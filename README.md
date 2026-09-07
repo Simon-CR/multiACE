@@ -6,7 +6,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
-(manuals updated version 0.99.8b)
+
 
 
 ## What's new in multiACE 1.00b
