@@ -42,7 +42,7 @@ The preflight can run the calibration per head at print start (#115).
 **Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
 auto-dry soft start, preflight and web UI fixes, installer fixes.
 
-**Nozzle wiper version 2 — new, larger purge bin** (unchanged from 0.99.8b):
+**Nozzle wiper version 2 - new, larger purge bin** (unchanged from 0.99.8b):
 **https://makerworld.com/en/models/3084827** Wiper ·
 **https://makerworld.com/en/models/3040955** Bin & Bin XL
 
