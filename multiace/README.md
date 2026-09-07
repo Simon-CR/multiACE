@@ -11,7 +11,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 ## What's new in multiACE 1.00b
 
-**RFID tags: read and write any tag**the UID of any tag, read and write for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
+**RFID tags: read and write any tag** the UID of any tag, read and write for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
 **Experimental:** tag reading and writing has so far been tested on a single printer
 with one set of ACE 2 Pro units - expect rough edges and report what you see.
 And due to the ACE 2 hardware only one side of a spool can be written - a spool with a tag
