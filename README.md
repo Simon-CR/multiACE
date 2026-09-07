@@ -7,7 +7,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
 
-
+Known Problem: Runs with firmware 1.6 only.. Patch on the way..
 
 ## What's new in multiACE 1.00b
 
