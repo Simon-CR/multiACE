@@ -7,9 +7,9 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
 
-Known Problem: Runs with firmware 1.6 only.. Patch on the way..
 
-## What's new in multiACE 1.00b
+
+## What's new in multiACE 1.00.1b
 
 **RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
 **Experimental:** tag reading and writing has so far been tested on a single printer
