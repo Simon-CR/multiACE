@@ -42,7 +42,7 @@ multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U
 - **Parked position background swaps** (per Head mode only, it is not possible in multi mode with Ace Hardware)
   (Even though this mode is now part of the release, it is still considered **experimental**. Even with the new hardware,   contamination    from the park position can end up in the print. Purge may build up on the wipers.)
   I'll try to work that out. Everyone is invited to share their ideas in the meantime.
-  - **Custom Temp and Tip Forming** (see https://postapocalyptic-diy.com/temp-and-tip-tuning/)
+- **Custom Temp and Tip Forming** (see https://postapocalyptic-diy.com/temp-and-tip-tuning/)
   Easily exchangeable through strings, Step Editor included in config, Please post you results in the sticky issue
  - **Quad Replenish - ACE Refill** - When a spool runs out mid-print, multiACE loads a matching spool from another ace or slot and   continues.
 - **Spool management** - A list of your spools with material, colour, vendor and remaining weight, linked to the slots. Consumption is booked while printing, so the remaining weight stays current on its own. Spools can be assigned by hand or automatically from an RFID tag. Synced with an external stock system. (Spoolman or SpoolLink (paxx) the inventory degrades to a cache.
