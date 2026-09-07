@@ -16,8 +16,8 @@ are read automatically when the spool is inserted; the picker gets **Read tag** 
 **Write to tag** buttons (OpenSpool or Anycubic format, optionally with the card UID as
 SKU so every ACE (V1, V2 Stock) recognises the spool).
 **Experimental:** tag reading and writing has so far been tested on a single printer
-with one set of ACE 2 Pro units â€” expect rough edges and report what you see.
-And due to the ACE 2 hardware only one side of a spool can be written â€” a spool with a tag
+with one set of ACE 2 Pro units - expect rough edges and report what you see.
+And due to the ACE 2 hardware only one side of a spool can be written - a spool with a tag
 on each flange gets the tag facing the reader written, the other side stays as it is.
 
 
