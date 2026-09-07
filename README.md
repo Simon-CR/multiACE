@@ -17,7 +17,7 @@ are read automatically when the spool is inserted; the picker gets **Read tag** 
 SKU so every ACE (V1, V2 Stock) recognises the spool).
 
 **ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
-Config tab: stock 1.1.31, or the patched **ACE2-Open** build. A big thank you to
+Config tab: stock 1.1.31, or patch automatically to **ACE2-Open** build. A big thank you to
 **[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** — his ACE 2 Pro
 firmware research and the ACE2-Open UID passthrough are what make everything below
 possible. (Flashing is at your own risk — never during a print, never unplug.)
