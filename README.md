@@ -9,16 +9,37 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 (manuals updated version 0.99.8b)
 
 
-## What's new in multiACE 0.99.8b "Resupply Run" (Update, mod and firmware.bin available)
+## What's new in multiACE 1.00b
 
+**RFID tags: read and write any tag** (ACE2-Open units). OpenSpool and blank NTAG tags
+are read automatically when the spool is inserted; the picker gets **Read tag** and
+**Write to tag** buttons (OpenSpool or Anycubic format, optionally with the card UID as
+SKU so every ACE (V1, V2 Stock) recognises the spool).
 
-  
-**Nozzle wiper updated to version 2 — new, larger purge bin.**
+**ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
+Config tab: stock 1.1.31, or the patched **ACE2-Open** build. A big thank you to
+**[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** — his ACE 2 Pro
+firmware research and the ACE2-Open UID passthrough are what make everything below
+possible. (Flashing is at your own risk — never during a print, never unplug.)
 
-**https://makerworld.com/en/models/3084827** Wiper
+**Spools bound by card UID.** A spool can be identified by its chip's serial, not only by
+the tag's SKU — several codes per spool, learned on hand assignment, shared with Spoolman
+and SpoolLink.
+
+**Pressure advance per spool.** The stock flow calibration is stored on the spool and
+applied automatically whenever that spool is loaded; synced with Spoolman using the same
+field as the [pechex/SpoolLink mod](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/pull/649).
+The preflight can run the calibration per head at print start (#115).
+
+**API documentation** for slicers, hosts and scripts now ships with multiACE — see
+[API documentation](#api-documentation-for-slicers-hosts-and-scripts).
+
+**Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
+auto-dry soft start, preflight and web UI fixes, installer fixes.
+
+**Nozzle wiper version 2 — new, larger purge bin** (unchanged from 0.99.8b):
+**https://makerworld.com/en/models/3084827** Wiper ·
 **https://makerworld.com/en/models/3040955** Bin & Bin XL
-
-
 
 
 ## multiACE 
@@ -589,6 +610,20 @@ multiACE is a **community project** — built by hobbyists, for hobbyists. A qui
 
 If any of that doesn't sit right, no worries — your printer keeps working with stock Snapmaker firmware as it is. If you're on board: have fun, and feedback / issues are always welcome.
 
+## API documentation (for slicers, hosts and scripts)
+
+multiACE can be driven from outside — a slicer plugin, a print host or a plain
+script. The contract lives in `docs/`:
+
+- [`ENGINE_API.md`](docs/ENGINE_API.md) — the gcode command vocabulary, the
+  `ace` status object, push events and versioning (Moonraker REST/WebSocket; nothing
+  imports the engine, so your program keeps its own licence).
+- [`LOADOUT_API.md`](docs/LOADOUT_API.md) — the web backend's HTTP API: read what
+  is actually loaded (spools, head wiring, nozzle sizes) before assigning filaments, and
+  hand a sliced file back.
+- [`SEND_TO_MULTIACE.md`](docs/SEND_TO_MULTIACE.md) — the upload endpoint in
+  detail (inbox semantics, status codes).
+
 ## License
 
 This project is based on [SnapACE](https://github.com/BlackFrogKok/SnapACE) and [Klipper](https://github.com/Klipper3d/klipper), both licensed under GPL-3.0. multiACE is therefore also GPL-3.0.
@@ -612,6 +647,8 @@ All content is reviewed by humans before inclusion.
 ## Credits
 
 - **[ Hakimio](https://github.com/hakimio)** for ACE Pro 2 reverse engineering and support, firmware flash
+- **[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** - ACE 2 Pro firmware research and the ACE2-Open UID passthrough that makes reading and writing foreign RFID tags possible
+- **[pechex](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/pull/649)** - the per-spool pressure-advance schema (`pressure_advance_matrix`) multiACE shares for Spoolman interop
 - **[SnapACE](https://github.com/BlackFrogKok/SnapACE)** by BlackFrogKok - Foundation for ACE Pro Klipper integration
 - **[DuckACE](https://github.com/utkabobr/DuckACE)** - ACE Pro reverse engineering and protocol documentation
 - **[ACE Research](https://github.com/printers-for-people/ACEResearch)** by Printers for People - ACE Pro protocol research
