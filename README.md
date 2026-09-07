@@ -23,12 +23,12 @@ on each flange gets the tag facing the reader written, the other side stays as i
 
 **ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
 Config tab: stock 1.1.31, or patch automatically to **ACE2-Open** build. A big thank you to
-**[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** — his ACE 2 Pro
+**[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** - his ACE 2 Pro
 firmware research and the ACE2-Open UID passthrough are what make everything below
-possible. (Flashing is at your own risk — never during a print, never unplug.)
+possible. (Flashing is at your own risk - never during a print, never unplug.)
 
 **Spools bound by card UID.** A spool can be identified by its chip's serial, not only by
-the tag's SKU — several codes per spool, learned on hand assignment, shared with Spoolman
+the tag's SKU - several codes per spool, learned on hand assignment, shared with Spoolman
 and SpoolLink.
 
 **Pressure advance per spool.** The stock flow calibration is stored on the spool and
@@ -36,7 +36,7 @@ applied automatically whenever that spool is loaded; synced with Spoolman using 
 field as the [pechex/SpoolLink mod](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/pull/649).
 The preflight can run the calibration per head at print start (#115).
 
-**API documentation** for slicers, hosts and scripts now ships with multiACE — see
+**API documentation** for slicers, hosts and scripts now ships with multiACE - see
 [API documentation](#api-documentation-for-slicers-hosts-and-scripts).
 
 **Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
