@@ -18,7 +18,7 @@ And due to the ACE 2 hardware only one side of a spool can be written - a spool 
 on each flange gets the tag facing the reader written, the other side stays as it is.
 
 
-**ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
+**ACE2-Open firmware - flash from the web UI.** Flash an ACE 2 Pro straight from the
 Config tab: stock 1.1.31, or patch automatically to **ACE2-Open** build. A big thank you to
 **[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** - his ACE 2 Pro
 firmware research and the ACE2-Open UID passthrough are what make everything below
