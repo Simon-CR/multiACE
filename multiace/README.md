@@ -15,6 +15,10 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 are read automatically when the spool is inserted; the picker gets **Read tag** and
 **Write to tag** buttons (OpenSpool or Anycubic format, optionally with the card UID as
 SKU so every ACE (V1, V2 Stock) recognises the spool).
+**Experimental:** tag reading and writing has so far been tested on a single printer
+with one set of ACE 2 Pro units - expect rough edges and report what you see.
+And due to the ACE 2 hardware only one side of a spool can be written - a spool with a tag
+on each flange gets the tag facing the reader written, the other side stays as it is.
 
 **ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
 Config tab: stock 1.1.31, or patch automatically to ACE2-Open build **ACE2-Open** build. A big thank you to
