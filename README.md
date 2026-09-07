@@ -9,27 +9,8 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 (manuals updated version 0.99.8b)
 
 
-Known issues: 
-
-- Not compatible with 1.6.0 firmware, its flow calibrator expects a new nozzle attribute, and in ace mode this leads to
-a Klipper shutdown, will be ported with the next version
-- starting the ACE 2 Pro dryer directly above 50 °C can trigger a ptc_error in the ACE firmware, which then needs a power cycle. This is a firmware limitation, not multiACE, but the automatic humidity control runs into it every time it restarts the heater at a stored higher target. The next version works around it with a soft ramp: start at 50 °C and raise to the configured target after a few minutes.
-- Per pair purge in WebUI stays unchecked. Just ACE_SET_PURGE MATRIX=1 in fluidd console enables it (still not visible in WebUI), will be fixed in next version. 
-
-
-
 ## What's new in multiACE 0.99.8b "Resupply Run" (Update, mod and firmware.bin available)
 
-- Quad Replenish - ACE Refill - When a spool runs out mid-print, multiACE loads a matching spool from another ace or slot and continues.
-- Spool management - A list of your spools with material, colour, vendor and remaining weight, linked to the slots. Consumption is booked while printing, so the remaining weight stays current on its own. Spools can be assigned by hand or automatically from an RFID tag. Synced with an external stock system. (Spoolman or SpoolLink (paxx) the inventory degrades to a cache.
-ACE units do not read or expose the spools uid so it uses the sku field. (Spoolman: sku = id or cards_uid)
-- Humidity-controlled drying - An ACE 2 regulates its dryer by its own humidity reading instead of a fixed timer, and takes any connected ACE Pro along, which cannot measure humidity itself.
-- Per-pair purge - The flush volume for a colour change is now taken from the slicer's own flush matrix instead of one fixed length for every pair. Similar colours purge less, hard transitions purge more.
-- Air Print Detection - Watches the flow sensor during loading and while printing and catches cases where filament is present but nothing actually comes out of the nozzle.
-- Updated Compact panel view - Renders a reduced view that can be embedded in Fluidd as a cam, so the ACE status stays visible next to the print.
-- Firmware flash: ACE 2 firmware updates from the web UI. Duration now 10sec instead of 30minutes.
-
-(The flash engine is based on hakimio's OTA updater and is used with his permission. Thanks to hakimio for doing the reverse engineering that made this possible in the first place, and for letting multiACE build on it.)
 
   
 **Nozzle wiper updated to version 2 — new, larger purge bin.**
@@ -37,14 +18,6 @@ ACE units do not read or expose the spools uid so it uses the sku field. (Spoolm
 **https://makerworld.com/en/models/3084827** Wiper
 **https://makerworld.com/en/models/3040955** Bin & Bin XL
 
-- Custom Temp and Tip Forming (see https://postapocalyptic-diy.com/temp-and-tip-tuning/)
-  Easily exchangeable through strings, Step Editor included in config, Please post you results in the sticky issue
-- **Parked position background swaps** (per Head mode only, it is not possible in multi mode with Ace Hardware)
-  (Even though this mode is now part of the release, it is still considered **experimental**. Even with the new hardware, contamination    from the park position can end up in the print. Purge may build up on the wipers.)
-  I'll try to work that out. Everyone is invited to share their ideas in the meantime.
-- Parallel preload
-- Prepared for the 1.5.2 Firmware
-- Many internal improvements
 
 
 
@@ -62,6 +35,32 @@ ACE units do not read or expose the spools uid so it uses the sku field. (Spoolm
 
 multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
 
+
+## Features
+
+- **In-Print Color Swaps** - Layer-boundary and mid-layer color swaps during an active print
+- **Parked position background swaps** (per Head mode only, it is not possible in multi mode with Ace Hardware)
+  (Even though this mode is now part of the release, it is still considered **experimental**. Even with the new hardware,   contamination    from the park position can end up in the print. Purge may build up on the wipers.)
+  I'll try to work that out. Everyone is invited to share their ideas in the meantime.
+  - **Custom Temp and Tip Forming** (see https://postapocalyptic-diy.com/temp-and-tip-tuning/)
+  Easily exchangeable through strings, Step Editor included in config, Please post you results in the sticky issue
+ - **Quad Replenish - ACE Refill** - When a spool runs out mid-print, multiACE loads a matching spool from another ace or slot and   continues.
+- **Spool management** - A list of your spools with material, colour, vendor and remaining weight, linked to the slots. Consumption is booked while printing, so the remaining weight stays current on its own. Spools can be assigned by hand or automatically from an RFID tag. Synced with an external stock system. (Spoolman or SpoolLink (paxx) the inventory degrades to a cache.
+ACE units do not read or expose the spools uid so it uses the sku field. (Spoolman: sku = id or cards_uid)
+- **Humidity-controlled drying** - An ACE 2 regulates its dryer by its own humidity reading instead of a fixed timer, and takes any connected ACE Pro along, which cannot measure humidity itself.
+- **Per-pair purge** - The flush volume for a colour change is now taken from the slicer's own flush matrix instead of one fixed length for every pair. Similar colours purge less, hard transitions purge more.
+- **Air Print Detection** - Watches the flow sensor during loading and while printing and catches cases where filament is present but nothing actually comes out of the nozzle.
+- **Compact panel view** - Renders a reduced view that can be embedded in Fluidd as a cam, so the ACE status stays visible next to the print.
+- **Firmware flash**: ACE 2 firmware updates from the web UI. Duration now 10sec instead of 30minutes.
+
+(The flash engine is based on hakimio's OTA updater and is used with his permission. Thanks to hakimio for doing the reverse engineering that made this possible in the first place, and for letting multiACE build on it.)
+
+- **Hardened Load / Unload** - Retract-recovery between extrude retries, pause-state snapshot before failure, safer resume path (pre-heat before travel, Z-hop before XY)
+- **Online Updates ** 
+- **Auto-Load** - Load all filaments autmatically, Parallel preload in bg mode
+- **RFID Handling** - Automatic RFID detection and display across ACE switches
+- **PAXX Firmware Compatible / Installer** - Works with PAXX firmware which provides display mirroring, allowing full load/unload control from your computer / Integrated PAXX Firmware 
+- **Clean Install/Uninstall** - One-command scripts with automatic backup and restore
 
 
 ## ACE Pro 2 Support 
@@ -114,24 +113,6 @@ replacing the stock U1 touchscreen UI.
 Support for FOrca Slicer (https://github.com/jiyang1018/FOrcaSlicer) Gcode, Upload via WebUI or directly sent from new 
 Foraca Slicer [Version ](https://github.com/jiyang1018/FOrcaSlicer/releases/tag/v2.3.2-fos.8.6.0)
 
-
-
-## Features
-
-- **In-Print Color Swaps** - Layer-boundary and mid-layer color swaps during an active print, triggered from slicer gcode or via post-processing script
-- **Full Cross-ACE Feed_Assist** - All connected ACEs stay fully available during a print, feed_assist on every head, at stock toolchange speed (rewritten USB engine)
-- **Hardened Load / Unload** - Retract-recovery between extrude retries, pause-state snapshot before failure, safer resume path (pre-heat before travel, Z-hop before XY)
-- **FA / Load Toggle per ACE** - Disable feed_assist per-ACE and separately for print-time / load-time (`fa_print_disable` / `fa_load_disable`)
-- **Online Updates ** 
-- **ACE Switching** - Switch between ACE units via Fluidd macros or console
-- **Auto-Load** - Load all filled slots from selected ACE with one command
-- **Unload All** - Unload all toolheads, automatically switching to correct ACE for retract
-- **RFID Handling** - Automatic RFID detection and display across ACE switches
-- **Manual Filament Support** - Works with both RFID and non-RFID spools
-- **Per-ACE Dryer Settings** - Configurable temperature and duration per ACE
-- **Normal Mode** - Switch back to stock Snapmaker operation at any time (only original files active, no ACE code running). Useful for filaments the ACE Pro cannot handle, such as TPU/TPE
-- **PAXX Firmware Compatible / Installer** - Works with PAXX firmware which provides display mirroring, allowing full load/unload control from your computer / Integrated PAXX Firmware 
-- **Clean Install/Uninstall** - One-command scripts with automatic backup and restore
 
 ## Requirements
 
