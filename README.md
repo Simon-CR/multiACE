@@ -619,13 +619,13 @@ If any of that doesn't sit right, no worries — your printer keeps working with
 multiACE can be driven from outside — a slicer plugin, a print host or a plain
 script. The contract lives in `docs/`:
 
-- [`ENGINE_API.md`](docs/ENGINE_API.md) — the gcode command vocabulary, the
+- [`ENGINE_API.md`](multiace/docs/ENGINE_API.md) — the gcode command vocabulary, the
   `ace` status object, push events and versioning (Moonraker REST/WebSocket; nothing
   imports the engine, so your program keeps its own licence).
-- [`LOADOUT_API.md`](docs/LOADOUT_API.md) — the web backend's HTTP API: read what
+- [`LOADOUT_API.md`](multiace/docs/LOADOUT_API.md) — the web backend's HTTP API: read what
   is actually loaded (spools, head wiring, nozzle sizes) before assigning filaments, and
   hand a sliced file back.
-- [`SEND_TO_MULTIACE.md`](docs/SEND_TO_MULTIACE.md) — the upload endpoint in
+- [`SEND_TO_MULTIACE.md`](multiace/docs/SEND_TO_MULTIACE.md) — the upload endpoint in
   detail (inbox semantics, status codes).
 
 ## License
