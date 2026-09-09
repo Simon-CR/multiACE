@@ -2009,7 +2009,7 @@ class MultiAce:
                 deadline = time.monotonic() + 20.0
                 attempt = 0
                 while time.monotonic() < deadline and len(self._ace_devices) < expected:
-                    self.reactor.pause(self.reactor.monotonic() + 1.0)
+                    time.sleep(1.0)
                     attempt += 1
                     self._refresh_ace_devices('startup_wait_%d' % attempt)
             if len(self._ace_devices) < expected:
@@ -2520,7 +2520,7 @@ class MultiAce:
             if (self._v2_get_slot_status(idx, slot) == 'ready'
                     and not self._v2_any_slot_active(idx)):
                 return None
-            self.reactor.pause(self.reactor.monotonic() + 1.0)
+            time.sleep(1.0)
         logging.info('[multiACE] [insert-read] procedure never finished - '
                      'reading anyway')
         return None
@@ -3815,7 +3815,7 @@ class MultiAce:
                     logging.info('[multiACE] open ACE %d timed out '
                                  '(serial still opening off-thread)' % idx)
                     return False
-                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                time.sleep(0.05)
             if _open_res['err'] is not None:
                 raise _open_res['err']
             ser = _open_res['ser']
@@ -12041,7 +12041,7 @@ class MultiAce:
             self._usb_log.info('RETRY [switch] target=%d not present, starting retries', target)
             for retry in range(5):
                 self._usb_stats['retries'] += 1
-                self.reactor.pause(self.reactor.monotonic() + 1.0)
+                time.sleep(1.0)
                 self._refresh_ace_devices('switch_retry_%d' % (retry + 1))
                 self._usb_log.info('RETRY [switch] attempt=%d/%d present=%d target=%d', retry + 1, 5, len(self._ace_present), target)
                 if self._is_ace_present(target):
@@ -12712,7 +12712,7 @@ class MultiAce:
                     self._usb_log.info('ENSURE ace=%d found after %d retries', ace_index, attempt)
                 return True
             self._usb_stats['retries'] += 1
-            self.reactor.pause(self.reactor.monotonic() + 1.0)
+            time.sleep(1.0)
         self._usb_log.warning('ENSURE ace=%d FAILED after 5 attempts (present %d)', ace_index, len(self._ace_present))
         return False
 
@@ -13548,7 +13548,7 @@ class MultiAce:
             return None
         deadline = self.reactor.monotonic() + timeout
         while done[0] is None and self.reactor.monotonic() < deadline:
-            self.reactor.pause(self.reactor.monotonic() + 0.05)
+            time.sleep(0.05)
         return done[0]
 
     def _tipform_rejected(self, resp):
@@ -13635,7 +13635,7 @@ class MultiAce:
                 if not self._tipform_rejected(resp):
                     self._feed_assist_per_ace[ace_idx] = slot
                     return True
-                self.reactor.pause(self.reactor.monotonic() + 1.0)
+                time.sleep(1.0)
             return False
 
         def _tf_unwind(ln):
