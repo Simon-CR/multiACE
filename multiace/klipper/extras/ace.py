@@ -14,6 +14,16 @@ from serial import SerialException
 from .ace_protocol_v1 import AceProtocolV1
 from .ace_protocol_v2 import AceProtocolV2
 
+try:
+    from .ace_rotisserie import AceRotisserie
+except ImportError:
+    from ace_rotisserie import AceRotisserie
+
+try:
+    from . import ace_tag_formats
+except ImportError:
+    import ace_tag_formats
+
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
 MULTIACE_VERSION = "1.00.1b"
@@ -23,6 +33,47 @@ ACE_API_VERSION = 1
 
 MULTIACE_BUILD_TAG = "f026fc15"
 MULTIACE_BUNDLE_SHA1 = "573fa61"
+
+def _resolve_multiace_paths(config):
+    printer = config.get_printer()
+    printer_args = getattr(printer, 'get_args', lambda: {})() or {}
+    cfg_file = printer_args.get('config_file', '')
+    env_cfg = os.environ.get('KLIPPER_CONFIG_DIR', '')
+    env_data = os.environ.get('PRINTER_DATA', '')
+
+    if env_cfg and os.path.isdir(env_cfg):
+        config_dir = os.path.abspath(env_cfg)
+        printer_data = env_data if (env_data and os.path.isdir(env_data)) else os.path.dirname(config_dir)
+    elif cfg_file and os.path.isfile(cfg_file):
+        config_dir = os.path.dirname(os.path.abspath(cfg_file))
+        printer_data = os.path.dirname(config_dir)
+    elif os.path.isdir('/home/lava/printer_data/config'):
+        config_dir = '/home/lava/printer_data/config'
+        printer_data = '/home/lava/printer_data'
+    else:
+        home = os.path.expanduser('~')
+        config_dir = os.path.join(home, 'printer_data', 'config')
+        printer_data = os.path.join(home, 'printer_data')
+
+    log_dir = os.path.join(printer_data, 'logs')
+    extended_dir = os.path.join(config_dir, 'extended')
+    multiace_cfg_dir = os.path.join(extended_dir, 'multiace')
+
+    for d in (log_dir, extended_dir, multiace_cfg_dir, os.path.join(config_dir, 'persistent')):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+
+    return {
+        'printer_data': printer_data,
+        'config_dir': config_dir,
+        'log_dir': log_dir,
+        'ace_cfg': os.path.join(extended_dir, 'ace.cfg'),
+        'slot_overrides': os.path.join(multiace_cfg_dir, 'slot_overrides.json'),
+        'i18n_primary': os.path.join(multiace_cfg_dir, 'i18n'),
+        'spool_db': os.path.join(config_dir, 'persistent', 'multiace_spools.json'),
+    }
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -257,6 +308,10 @@ class MultiAce:
         self.send_time = None
         self.ace_dev_fd = None
         self.heartbeat_timer = None
+
+        self.paths = _resolve_multiace_paths(config)
+        self.ACE_CFG_PATH = config.get('ace_cfg', self.paths['ace_cfg'])
+        self.rotisserie = AceRotisserie(self)
 
         self.gate_status = [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN]
         if self._name.startswith('ace '):
@@ -571,8 +626,8 @@ class MultiAce:
         self._info_per_ace = {}
 
         self._slot_overrides = {}
-        self._slot_overrides_file = (
-            "/home/lava/printer_data/config/extended/multiace/slot_overrides.json")
+        self._slot_overrides_file = config.get(
+            'slot_overrides_file', self.paths['slot_overrides'])
         self._slot_overrides_mtime = 0.0
 
         self._orig_set_ptc = None
@@ -624,8 +679,10 @@ class MultiAce:
         self._enable_web = config.getboolean('enable_web', True)
         self._web_port = config.getint(
             'web_port', 7126, minval=1024, maxval=65535)
-        self._web_dir = config.get(
-            'web_dir', '/home/lava/multiace_web')
+        _default_web = os.path.join(self.paths['printer_data'], '..', 'multiace_web')
+        if not os.path.isdir(_default_web) and os.path.isdir('/home/lava/multiace_web'):
+            _default_web = '/home/lava/multiace_web'
+        self._web_dir = config.get('web_dir', _default_web)
 
         config.get('identity_priority', '')
         _sm_raw = (config.get('spool_mode', '') or '').strip().lower()
@@ -649,7 +706,7 @@ class MultiAce:
         self._inbox_max_mb = config.getint(
             'inbox_max_mb', 256, minval=1, maxval=4096)
 
-        self._i18n_primary = '/home/lava/printer_data/config/extended/multiace/i18n'
+        self._i18n_primary = config.get('i18n_dir', self.paths['i18n_primary'])
         self._i18n_fallback = os.path.join(self._web_dir, 'i18n')
         self._reload_i18n_catalog()
 
@@ -720,7 +777,7 @@ class MultiAce:
         self._fa_failed_pause_sent = False
         self._fa_failed_notified = {}
 
-        log_dir = config.get('log_dir', '/home/lava/printer_data/logs')
+        log_dir = config.get('log_dir', self.paths['log_dir'])
         self._usb_log = _setup_file_logger(
             'multiace_usb', os.path.join(log_dir, 'multiace_usb.log'))
         self._state_log = _setup_file_logger(
@@ -733,9 +790,7 @@ class MultiAce:
             'multiace_fa', os.path.join(log_dir, 'multiace_fa.log'))
         self._feedlog = _setup_file_logger(
             'multiace_feedlog', os.path.join(log_dir, 'multiace_feedlog.log'))
-        self.spool_db_path = config.get(
-            'spool_db', '/home/lava/printer_data/config/persistent/'
-                        'multiace_spools.json')
+        self.spool_db_path = config.get('spool_db', self.paths['spool_db'])
         self._spools = {}
         self._spool_binding = {}
         self._spool_next_id = 1
@@ -6316,6 +6371,8 @@ class MultiAce:
                 return
 
             self._schedule_dry_exhaust_open(dry_idx, 'manual drying')
+            if hasattr(self, 'rotisserie'):
+                self.rotisserie.start()
             self.gcode.respond_info(self._t('msg.dryer_started'))
 
         self.wait_ace_ready()
@@ -6345,6 +6402,8 @@ class MultiAce:
             self.gcode.respond_info(self._t('msg.dryer_stopped_on_ace',
                 ace=self._disp(ace_idx)))
 
+        if hasattr(self, 'rotisserie'):
+            self.rotisserie.stop()
         self._auto_dry_release(ace_idx, 'ACE_STOP_DRYING')
         self._close_dry_exhaust(ace_idx, 'ACE_STOP_DRYING')
         self.wait_ace_ready_on(ace_idx)
@@ -6769,6 +6828,8 @@ class MultiAce:
         try:
             extruder = self.printer.lookup_object(
                 'extruder' if head == 0 else 'extruder%d' % head, None)
+            if extruder is None:
+                extruder = self.printer.lookup_object('extruder', None)
             pheaters = self.printer.lookup_object('heaters', None)
             if extruder is not None and pheaters is not None:
                 pheaters.set_temperature(extruder.get_heater(), 0.)
@@ -14405,6 +14466,8 @@ class MultiAce:
             extruder_name = 'extruder' if head == 0 else 'extruder%d' % head
             extruder = self.printer.lookup_object(extruder_name, None)
             if extruder is None:
+                extruder = self.printer.lookup_object('extruder', None)
+            if extruder is None:
                 logging.info(
                     '[multiACE] _get_swap_temp head=%d step2 skip '
                     '(%s not loaded)' % (head, extruder_name))
@@ -16683,6 +16746,7 @@ class MultiAce:
             'status': self._info['status'],
             'temp': self._info['temp'],
             'dryer_status': self._info['dryer_status'],
+            'rotisserie': self.rotisserie.get_status() if hasattr(self, 'rotisserie') else {},
             'gate_status': self.gate_status,
             'active_device': self._active_device_index,
             'device_count': len(self._ace_devices),

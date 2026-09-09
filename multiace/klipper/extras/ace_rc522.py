@@ -2,6 +2,11 @@
 import json
 import logging
 
+try:
+    from . import ace_tag_formats
+except ImportError:
+    import ace_tag_formats
+
 PARK_STEP_MM = 20
 PARK_SPEED = 40
 PARK_MAX_MM = 600
@@ -289,19 +294,37 @@ class AceTagReader:
             typ = msg[off:off + tl]; off += tl
             payload = msg[off:off + pl]
             if typ != b'application/json':
-                return None
+                raise ValueError("not json")
             j = json.loads(payload.decode('utf-8', 'replace'))
-            if str(j.get('protocol', '')).lower() != 'openspool':
-                return None
-            return {
-                'material': (j.get('type') or '').strip(),
-                'color': (j.get('color_hex') or '').lstrip('#').upper()[:6],
-                'vendor': (j.get('brand') or '').strip(),
-                'min_temp': j.get('min_temp'),
-                'max_temp': j.get('max_temp'),
-            }
-        except (IndexError, ValueError, TypeError, UnicodeError):
-            return None
+            if str(j.get('protocol', '')).lower() == 'openspool':
+                return {
+                    'material': (j.get('type') or '').strip(),
+                    'color': (j.get('color_hex') or '').lstrip('#').upper()[:6],
+                    'vendor': (j.get('brand') or '').strip(),
+                    'min_temp': j.get('min_temp'),
+                    'max_temp': j.get('max_temp'),
+                    'format': 'openspool',
+                }
+        except Exception:
+            pass
+
+        # Fall back to multi-format tag decoder (FilaMan, Spoolman, Prusament, Creality, Bambu)
+        try:
+            fmt, _ = ace_tag_formats.identify(data)
+            if fmt in ('openspool', 'ndef-json', 'json', 'filaman', 'openprinttag', 'creality', 'bambu', 'prusament'):
+                rec = ace_tag_formats.parse(data, fmt=fmt)
+                if rec and rec.get('material'):
+                    return {
+                        'material': rec['material'],
+                        'color': (rec.get('color') or '808080').lstrip('#').upper()[:6],
+                        'vendor': rec.get('brand') or 'Generic',
+                        'min_temp': rec.get('temp_min'),
+                        'max_temp': rec.get('temp_max'),
+                        'format': fmt,
+                    }
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _openspool_encode(material, color_hex, brand='',
@@ -1051,6 +1074,17 @@ class AceTagReader:
                 self._note_uid(idx, slot, uid)
                 self._bind_uid(idx, slot, uid, respond)
                 return moved
+            ver = int((res.get('tag') or {}).get('field2', 0)) or int(res.get('version', 0))
+            if ver in (0x0101, 0x0102):
+                respond('rc522: native on-chip decoded tag (v0x%04x): %s %s (sku %s, UID %s)'
+                        % (ver, res.get('type', ''), res.get('brand', ''),
+                           (res.get('sku') or '-'), uid or '?'))
+                _fmt = 'openspool'
+                self._note_fmt(idx, slot, _fmt)
+                self._note_uid(idx, slot, uid)
+                ace._v2_store_filament_read(idx, slot, res, uid=uid, fmt=_fmt)
+                self._bind_uid(idx, slot, uid, respond, unbind=False)
+                return moved
             if (res.get('type') or '').strip():
                 respond('rc522: anycubic tag: %s %s (sku %s, UID %s)'
                         % (res.get('type', ''), res.get('brand', ''),
@@ -1074,9 +1108,10 @@ class AceTagReader:
                                                 fmt='anycubic')
                     self._note_uid(idx, slot, uid)
                     self._bind_uid(idx, slot, uid, respond, unbind=False)
-                return moved
-        self._note_fmt(idx, slot, 'openspool' if (os and os.get('material'))
-                       else ('unknown' if uid else ''))
+        detected_fmt = (os.get('format') if (os and os.get('format'))
+                        else ('openspool' if (os and os.get('material'))
+                        else ('unknown' if uid else '')))
+        self._note_fmt(idx, slot, detected_fmt)
         self._note_uid(idx, slot, uid)
         self._finish_present(idx, slot, uid, os, respond)
         return moved

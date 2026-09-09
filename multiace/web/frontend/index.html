@@ -428,6 +428,20 @@
                   <button @click="dryStart(ace.idx)">{{ t('ui.common.start') }}</button>
                   <button @click="dryStop(ace.idx)" class="warn">{{ t('ui.common.stop') }}</button>
                 </div>
+                <!-- Spool Rotisserie / Continuous Roasting -->
+                <div class="dry-row auto-dry" style="gap: 8px; flex-wrap: wrap; align-items: center;">
+                  <span style="font-weight: 600; font-size: 0.85em; opacity: 0.85;">Spool Rotisserie:</span>
+                  <label v-for="s in (ace.slots || [])" :key="s.index" style="display: inline-flex; align-items: center; gap: 4px; font-size: 0.8em; margin-right: 6px;">
+                    <span style="font-weight: 600;">S{{ s.index + 1 }}:</span>
+                    <select :value="rotisserieMode(ace.idx, s.index)"
+                            @change="setRotisserieMode(ace.idx, s.index, $event.target.value)"
+                            style="padding: 2px 4px; font-size: 0.85em; border-radius: 4px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid rgba(255,255,255,0.2);">
+                      <option value="off">Off</option>
+                      <option value="sweep">Sweep (Ready)</option>
+                      <option value="spin">Spin (Empty)</option>
+                    </select>
+                  </label>
+                </div>
                 <!-- Humidity control, ACE 2: it has the reading, so it owns
                      the thresholds. An invalid pair frames BOTH fields red
                      and is not sent (autoDryPairInvalid). -->

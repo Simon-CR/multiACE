@@ -4158,6 +4158,14 @@ createApp({
     function dryStop(aceIdx) {
       run("ACE_STOP_DRYING", {ACE: aceIdx});
     }
+    function rotisserieMode(aceIdx, slot) {
+      const rot = state.rotisserie;
+      if (!rot || !rot.modes) return 'off';
+      return rot.modes[`${aceIdx}_${slot}`] || 'off';
+    }
+    function setRotisserieMode(aceIdx, slot, mode) {
+      run("ACE_DRYROLL_SET", {ACE: aceIdx, SLOT: slot, MODE: mode});
+    }
     const snapshots = ref([]);
     const selectedSnapshot = ref("");
     const snapshotPreview = computed(() => snapshots.value.find(s => s.name === selectedSnapshot.value));
@@ -6365,6 +6373,7 @@ createApp({
       spoolExport, spoolImport, triggerSpoolImport,
       isPrinting,
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
+      rotisserieMode, setRotisserieMode,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
       aceHeadsRightSide,
