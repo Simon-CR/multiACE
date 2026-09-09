@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.class
+*.swp
+*.swo
+*~
+.DS_Store

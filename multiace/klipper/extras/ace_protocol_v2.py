@@ -474,7 +474,21 @@ class AceProtocolV2(AceProtocol):
                     _sub = pb_decode(_blob)
                     _tag[_key] = [_sub[k][0][1] for k in sorted(_sub)]
             if 2 in fields:
-                _tag['field2'] = _fval(fields, 2, 0)
+                _v2 = _fval(fields, 2, 0)
+                _tag['field2'] = _v2
+                ret['result']['version'] = _v2
+            if 6 in fields:
+                _b6 = fields.get(6, [(2, b'')])[0][1]
+                if isinstance(_b6, bytes) and _b6:
+                    _s6 = pb_decode(_b6)
+                    ret['result']['min_temp'] = _fval(_s6, 1, 0)
+                    ret['result']['max_temp'] = _fval(_s6, 2, 0)
+            if 7 in fields:
+                _b7 = fields.get(7, [(2, b'')])[0][1]
+                if isinstance(_b7, bytes) and _b7:
+                    _s7 = pb_decode(_b7)
+                    ret['result']['min_bed_temp'] = _fval(_s7, 1, 0)
+                    ret['result']['max_bed_temp'] = _fval(_s7, 2, 0)
             if _tag:
                 ret['result']['tag'] = _tag
             _extra = _unparsed_fields(fields, (1, 2, 3, 4, 5, 6, 7, 8, 9, 12))
@@ -487,11 +501,16 @@ class AceProtocolV2(AceProtocol):
                 if wtype != 2:
                     continue
                 fi = pb_decode(fi_payload)
+                dec = _fval(fi, 3, 0)
+                if dec >= (1 << 63):
+                    dec -= (1 << 64)
                 slots.append({
                     'index': len(slots),
                     'steps': _fval(fi, 1, 0),
                     'length': _fval(fi, 2, 0),
-                    'decoder': _fval(fi, 3, 0),
+                    'decoder': dec,
+                    'decoder_pulses': dec,
+                    'magnitude_mm': round(_fval(fi, 2, 0) / 100.0, 2) if _fval(fi, 2, 0) > 0 else 0.0,
                 })
             ret['result'] = {'feed_info': slots}
         elif cmd == Cmd.GET_KEY_STATE:
