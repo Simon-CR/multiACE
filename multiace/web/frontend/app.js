@@ -158,6 +158,7 @@ createApp({
       head_feeder: {},
       head_ace: {},
       dryer: null,
+      rotisserie: {active: false, modes: {}},
       swap_in_progress: false,
       aces: [], toolheads: [], wiring: [],
       save_variables: {},
@@ -323,6 +324,8 @@ createApp({
       state.head_feeder   = (s.head_feeder && typeof s.head_feeder === "object") ? s.head_feeder : {};
       state.head_ace      = (s.head_ace && typeof s.head_ace === "object") ? s.head_ace : {};
       state.dryer         = s.dryer ?? null;
+      state.rotisserie    = (s.rotisserie && typeof s.rotisserie === "object")
+        ? s.rotisserie : {active: false, modes: {}};
       state.swap_in_progress = !!s.swap_in_progress;
       state.calibration    = (s.calibration && typeof s.calibration === "object")
         ? s.calibration : {state: "idle", session_id: 0};
@@ -4158,6 +4161,14 @@ createApp({
     function dryStop(aceIdx) {
       run("ACE_STOP_DRYING", {ACE: aceIdx});
     }
+    function rotisserieMode(aceIdx, slot) {
+      const rot = state.rotisserie;
+      if (!rot || !rot.modes) return 'off';
+      return rot.modes[`${aceIdx}_${slot}`] || 'off';
+    }
+    function setRotisserieMode(aceIdx, slot, mode) {
+      run("ACE_DRYROLL_SET", {ACE: aceIdx, SLOT: slot, MODE: mode});
+    }
     const snapshots = ref([]);
     const selectedSnapshot = ref("");
     const snapshotPreview = computed(() => snapshots.value.find(s => s.name === selectedSnapshot.value));
@@ -6365,6 +6376,7 @@ createApp({
       spoolExport, spoolImport, triggerSpoolImport,
       isPrinting,
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
+      rotisserieMode, setRotisserieMode,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
       aceHeadsRightSide,

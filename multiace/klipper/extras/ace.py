@@ -14,6 +14,11 @@ from serial import SerialException
 from .ace_protocol_v1 import AceProtocolV1
 from .ace_protocol_v2 import AceProtocolV2
 
+try:
+    from .ace_rotisserie import AceRotisserie
+except ImportError:
+    from ace_rotisserie import AceRotisserie
+
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
 MULTIACE_VERSION = "1.00.1b"
@@ -257,6 +262,7 @@ class MultiAce:
         self.send_time = None
         self.ace_dev_fd = None
         self.heartbeat_timer = None
+        self.rotisserie = AceRotisserie(self)
 
         self.gate_status = [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN]
         if self._name.startswith('ace '):
@@ -6316,6 +6322,8 @@ class MultiAce:
                 return
 
             self._schedule_dry_exhaust_open(dry_idx, 'manual drying')
+            if hasattr(self, 'rotisserie'):
+                self.rotisserie.start()
             self.gcode.respond_info(self._t('msg.dryer_started'))
 
         self.wait_ace_ready()
@@ -6345,6 +6353,8 @@ class MultiAce:
             self.gcode.respond_info(self._t('msg.dryer_stopped_on_ace',
                 ace=self._disp(ace_idx)))
 
+        if hasattr(self, 'rotisserie'):
+            self.rotisserie.stop()
         self._auto_dry_release(ace_idx, 'ACE_STOP_DRYING')
         self._close_dry_exhaust(ace_idx, 'ACE_STOP_DRYING')
         self.wait_ace_ready_on(ace_idx)
@@ -16683,6 +16693,7 @@ class MultiAce:
             'status': self._info['status'],
             'temp': self._info['temp'],
             'dryer_status': self._info['dryer_status'],
+            'rotisserie': self.rotisserie.get_status() if hasattr(self, 'rotisserie') else {},
             'gate_status': self.gate_status,
             'active_device': self._active_device_index,
             'device_count': len(self._ace_devices),
