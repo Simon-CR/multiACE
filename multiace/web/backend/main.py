@@ -85,10 +85,13 @@ DEFAULT_MATERIALS = [
     "PC", "PC-ABS",
     "PVA",
 ]
-I18N_DIR = os.environ.get(
-    "MULTIACE_I18N_DIR",
-    str((Path(__file__).resolve().parent.parent / "i18n")),
-)
+_repo_i18n = Path(__file__).resolve().parent.parent / "i18n"
+if not _repo_i18n.is_dir():
+    _repo_i18n = Path(__file__).resolve().parent.parent.parent / "multiace" / "i18n"
+if not _repo_i18n.is_dir():
+    _repo_i18n = Path(__file__).resolve().parent.parent.parent / "i18n"
+
+I18N_DIR = os.environ.get("MULTIACE_I18N_DIR", str(_repo_i18n))
 SCREEN_PROBE_URL = os.environ.get("SCREEN_PROBE_URL", "http://127.0.0.1:8092/snapshot")
 
 HOMING_FLAG_PATH = os.environ.get(
@@ -4343,6 +4346,7 @@ async def get_materials() -> dict:
             "db": {m: {"Generic": []} for m in DEFAULT_MATERIALS}}
 
 @app.websocket("/ws")
+@app.websocket("/multiace/ws")
 async def ws(websocket: WebSocket) -> None:
     """
     Push channel for live updates. v1: simple ping every 5s plus a
@@ -4398,6 +4402,8 @@ _SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css"}
 
 @app.middleware("http")
 async def _shell_revalidate(request: Request, call_next):
+    if request.url.path.startswith("/multiace/"):
+        request.scope["path"] = request.url.path[len("/multiace"):]
     response = await call_next(request)
     if request.url.path in _SHELL_PATHS:
         response.headers["Cache-Control"] = "no-cache"
