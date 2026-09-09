@@ -158,6 +158,7 @@ createApp({
       head_feeder: {},
       head_ace: {},
       dryer: null,
+      rotisserie: {active: false, modes: {}},
       swap_in_progress: false,
       aces: [], toolheads: [], wiring: [],
       save_variables: {},
@@ -323,6 +324,8 @@ createApp({
       state.head_feeder   = (s.head_feeder && typeof s.head_feeder === "object") ? s.head_feeder : {};
       state.head_ace      = (s.head_ace && typeof s.head_ace === "object") ? s.head_ace : {};
       state.dryer         = s.dryer ?? null;
+      state.rotisserie    = (s.rotisserie && typeof s.rotisserie === "object")
+        ? s.rotisserie : {active: false, modes: {}};
       state.swap_in_progress = !!s.swap_in_progress;
       state.calibration    = (s.calibration && typeof s.calibration === "object")
         ? s.calibration : {state: "idle", session_id: 0};
