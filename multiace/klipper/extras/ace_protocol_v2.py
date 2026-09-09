@@ -454,11 +454,18 @@ class AceProtocolV2(AceProtocol):
                          (rgba >> 16) & 0xFF,
                          (rgba >> 8) & 0xFF]
                 break
+            brand = ''
+            if sku.startswith('PRUSA-'):
+                brand = 'Prusa Research'
+            elif sku.startswith('CFS-'):
+                brand = 'Creality'
+            elif sku.startswith('SM') and len(sku) == 10 and all(c in '0123456789ABCDEFabcdef' for c in sku[2:]):
+                brand = 'Bambu Lab'
             ret['result'] = {
                 'index': _fval(fields, 1, 0),
                 'sku': sku,
                 'type': ftype,
-                'brand': '',
+                'brand': brand,
                 'color': color,
                 'rfid': 2 if ftype else 0,
                 'code': _fval(fields, 12, 0),

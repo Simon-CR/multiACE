@@ -1053,10 +1053,18 @@ class AceTagReader:
                 return moved
             ver = int((res.get('tag') or {}).get('field2', 0)) or int(res.get('version', 0))
             if ver in (0x0101, 0x0102):
+                sku_val = (res.get('sku') or '').strip()
+                if not res.get('brand'):
+                    if sku_val.startswith('PRUSA-'):
+                        res['brand'] = 'Prusa Research'
+                    elif sku_val.startswith('CFS-'):
+                        res['brand'] = 'Creality'
+                    elif sku_val.startswith('SM') and len(sku_val) == 10 and all(c in '0123456789ABCDEFabcdef' for c in sku_val[2:]):
+                        res['brand'] = 'Bambu Lab'
+                _fmt = 'bambu' if res.get('brand') == 'Bambu Lab' else 'openspool'
                 respond('rc522: native on-chip decoded tag (v0x%04x): %s %s (sku %s, UID %s)'
                         % (ver, res.get('type', ''), res.get('brand', ''),
                            (res.get('sku') or '-'), uid or '?'))
-                _fmt = 'openspool'
                 self._note_fmt(idx, slot, _fmt)
                 self._note_uid(idx, slot, uid)
                 ace._v2_store_filament_read(idx, slot, res, uid=uid, fmt=_fmt)
