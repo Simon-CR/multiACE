@@ -85,13 +85,22 @@ DEFAULT_MATERIALS = [
     "PC", "PC-ABS",
     "PVA",
 ]
-_repo_i18n = Path(__file__).resolve().parent.parent / "i18n"
-if not _repo_i18n.is_dir():
-    _repo_i18n = Path(__file__).resolve().parent.parent.parent / "multiace" / "i18n"
-if not _repo_i18n.is_dir():
-    _repo_i18n = Path(__file__).resolve().parent.parent.parent / "i18n"
+def _resolve_i18n_dir() -> Path:
+    env = os.environ.get("MULTIACE_I18N_DIR")
+    if env and (Path(env) / "en.json").is_file():
+        return Path(env)
+    backend_dir = Path(__file__).resolve().parent
+    candidates = [
+        backend_dir.parent.parent / "i18n",       # multiace/i18n
+        backend_dir.parent / "i18n",              # multiace/web/i18n
+        backend_dir.parent.parent.parent / "i18n" # repo/i18n
+    ]
+    for c in candidates:
+        if (c / "en.json").is_file():
+            return c
+    return Path(env) if env else candidates[0]
 
-I18N_DIR = os.environ.get("MULTIACE_I18N_DIR", str(_repo_i18n))
+I18N_DIR = str(_resolve_i18n_dir())
 SCREEN_PROBE_URL = os.environ.get("SCREEN_PROBE_URL", "http://127.0.0.1:8092/snapshot")
 
 HOMING_FLAG_PATH = os.environ.get(
