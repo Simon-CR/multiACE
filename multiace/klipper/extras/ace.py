@@ -1155,6 +1155,13 @@ class MultiAce:
             desc=self.cmd_ACE_TAG_WRITE_help)
 
         self.gcode.register_command(
+            'ACE_LANE_NORMALIZE', self.cmd_ACE_LANE_NORMALIZE,
+            desc="Calibrate PTFE tube length and park lane at hub gate: T=<0..3> or ALL=1")
+        self.gcode.register_command(
+            'ACE_PTFE_HISTORY', self.cmd_ACE_PTFE_HISTORY,
+            desc="Query rolling PTFE calibration history and P95: [SIZE=<2-50>]")
+
+        self.gcode.register_command(
             'ACE_RAW_PROBE',
             self.cmd_ACE_RAW_PROBE,
             desc=self.cmd_ACE_RAW_PROBE_help)
@@ -2327,16 +2334,17 @@ class MultiAce:
                          'running - re-insert ignored' % (idx, slot))
             return
         self._insert_read_running.add(key)
+        ok = False
         try:
-            self._insert_uid_read(idx, slot, depth)
+            ok = bool(self._insert_uid_read(idx, slot, depth))
+            if ok:
+                self._pre_load(slot)
         except Exception:
-            logging.exception('[multiACE] [insert-read]')
+            logging.exception('[multiACE] insert read / pre-load')
         finally:
             self._insert_read_running.discard(key)
-        try:
-            self._pre_load(slot)
-        except Exception:
-            logging.exception('[multiACE] insert pre-load')
+            if ok:
+                self._insert_drain_queue()
 
     def _insert_tag_read_safe(self, idx, slot, depth='auto'):
         """C flow on a NON-active ACE: same abort+read, no _pre_load (that
@@ -2347,12 +2355,15 @@ class MultiAce:
         if key in self._insert_read_running:
             return
         self._insert_read_running.add(key)
+        ok = False
         try:
-            self._insert_uid_read(idx, slot, depth)
+            ok = bool(self._insert_uid_read(idx, slot, depth))
         except Exception:
             logging.exception('[multiACE] [insert-read] (non-active)')
         finally:
             self._insert_read_running.discard(key)
+            if ok:
+                self._insert_drain_queue()
 
     def _insert_uid_read(self, idx, slot, depth='auto'):
         """The C insert read (greenlet): verified abort of the firmware
@@ -2364,7 +2375,7 @@ class MultiAce:
         ps = self.printer.lookup_object('print_stats', None)
         if ps is not None and (getattr(ps, 'state', '') or '').lower() \
                 in ('printing', 'paused'):
-            return
+            return False
         if getattr(self, '_tag_read_busy', False):
             if depth == 'auto':
                 depth = self._insert_verified_abort(idx, slot)
@@ -2377,11 +2388,11 @@ class MultiAce:
                              'running - aborted the pull-in and QUEUED '
                              'ACE %d slot %d (depth=%s)'
                              % (idx, slot, depth))
-            return
+            return False
         try:
             from .ace_rc522 import AceTagReader
         except ImportError:
-            return
+            return False
         setattr(self, '_tag_read_busy', True)
         self._tag_op_kind = 'insert'
         try:
@@ -2433,7 +2444,7 @@ class MultiAce:
                     '[multiACE] [rc522] insert read_slot_transport')
         finally:
             setattr(self, '_tag_read_busy', False)
-            self._insert_drain_queue()
+        return True
 
     def _insert_drain_queue(self):
         """Process the next queued insert (if any): schedule its handler
@@ -2541,7 +2552,7 @@ class MultiAce:
             if (self._v2_get_slot_status(idx, slot) == 'ready'
                     and not self._v2_any_slot_active(idx)):
                 return None
-            time.sleep(1.0)
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
         logging.info('[multiACE] [insert-read] procedure never finished - '
                      'reading anyway')
         return None
@@ -5904,8 +5915,6 @@ class MultiAce:
                     is_busy_elsewhere = (
                         self._is_actively_printing()
                         or self._swap_in_progress
-                        or any(self._v2_get_slot_status(idx, s) in V2_ACTIVE_MOTION_STATES
-                               for s in range(4) if s != i)
                     )
                     if (is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
@@ -6232,31 +6241,257 @@ class MultiAce:
     def _handle_serial_failure(self, err, first, first_error=None):
         self._handle_per_ace_failure(self._active_device_index, err)
 
-    def _pre_load(self, gate):
-        feed_length = self.head_feed_length[gate]
+    def _is_hub_detected(self):
+        """Check if 4-to-1 hub sensor detects filament."""
+        s = self.printer.lookup_object('filament_switch_sensor hub_detect', None)
+        if s is not None:
+            try:
+                return bool(s.get_status(self.reactor.monotonic()).get('filament_detected'))
+            except Exception:
+                pass
+        ts = self.printer.lookup_object('temperature_sensor rdm_detect', None)
+        if ts is not None:
+            try:
+                temp = float(ts.get_status(self.reactor.monotonic()).get('temperature', 0.0))
+                return temp >= 70.0
+            except Exception:
+                pass
+        return False
 
-        if feed_length <= 0:
+    def _is_downstream_occupied(self):
+        """Check if toolhead entry or postgear sensors detect filament."""
+        for s_name in ('toolhead_entry', 'toolhead_postgear'):
+            s = self.printer.lookup_object('filament_switch_sensor ' + s_name, None)
+            if s is not None:
+                try:
+                    if s.get_status(self.reactor.monotonic()).get('filament_detected'):
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    @staticmethod
+    def _compute_p95(samples):
+        """Compute the 95th percentile with linear interpolation."""
+        if not samples:
+            return 0.0
+        s = sorted(float(x) for x in samples)
+        n = len(s)
+        if n == 1:
+            return round(s[0], 1)
+        k = (n - 1) * 0.95
+        f = int(k)
+        c = min(f + 1, n - 1)
+        d = k - f
+        val = s[f] + d * (s[c] - s[f])
+        return round(val, 1)
+
+    def _save_variable(self, name, value):
+        """Save a variable via save_variables safely without reactor blocking."""
+        sv = self.printer.lookup_object('save_variables', None)
+        if sv is None:
+            return
+        gcode = self.printer.lookup_object('gcode', None)
+        if gcode is None:
+            return
+        val_repr = repr(value)
+        if '"' in val_repr:
+            val_repr = val_repr.replace('"', '\\"')
+        cmd = 'SAVE_VARIABLE VARIABLE=%s VALUE="%s"' % (name, val_repr)
+        try:
+            gcode.run_script_from_command(cmd)
+        except Exception:
+            def _async_save(et=None):
+                try:
+                    gcode.run_script_from_command(cmd)
+                except Exception as e:
+                    logging.info('[multiACE] save_variable %s failed: %s' % (name, e))
+            self.reactor.register_callback(_async_save)
+
+    def cmd_ACE_LANE_NORMALIZE(self, gcmd):
+        """Calibrate PTFE tube length and park lane at hub gate: T=<0..3> or ALL=1"""
+        all_lanes = gcmd.get_int('ALL', 0)
+        if all_lanes:
+            for t in range(4):
+                slot_info = (self._info_per_ace.get(self._active_device_index, {}).get('slots') or [{}])[t] if t < len(self._info_per_ace.get(self._active_device_index, {}).get('slots', [])) else {}
+                st = slot_info.get('status', '')
+                if not self._is_empty_status(st):
+                    self._pre_load(t)
+            return
+        tool = gcmd.get_int('T', gcmd.get_int('INDEX', None))
+        if tool is None or tool < 0 or tool >= 4:
+            raise gcmd.error("ACE_LANE_NORMALIZE: T=<0..3> required")
+        self._pre_load(tool)
+
+    def cmd_ACE_PTFE_HISTORY(self, gcmd):
+        """Display rolling PTFE calibration history and 95th percentile."""
+        sz_param = gcmd.get_int("SIZE", None)
+        if sz_param is not None and 2 <= sz_param <= 50:
+            self._save_variable("ace_cal_ptfe_history_size", sz_param)
+            gcmd.respond_info("[PTFE] Calibration window size set to %d samples" % sz_param)
+        sv = self.printer.lookup_object('save_variables', None)
+        vars = sv.get_status(None).get('variables', {}) if sv else {}
+        hist = vars.get('ace_cal_ptfe_history', [[], [], [], []])
+        per = vars.get('ace_cal_park_to_hub', [0, 0, 0, 0])
+        sz = int(vars.get('ace_cal_ptfe_history_size', 10))
+        gcmd.respond_info("[PTFE] Rolling Calibration History (last %d samples, 95th percentile):" % sz)
+        for t in range(4):
+            samples = hist[t] if t < len(hist) and isinstance(hist[t], list) else []
+            p95 = self._compute_p95(samples) if samples else (float(per[t]) if t < len(per) else 0.0)
+            cur = float(per[t]) if t < len(per) else 0.0
+            samples_str = ", ".join("%.1f" % x for x in samples) if samples else "no samples"
+            gcmd.respond_info("  T%d: current=%.1fmm, p95=%.1fmm (n=%d) [%s]"
+                              % (t, cur, p95, len(samples), samples_str))
+
+    def _pre_load(self, gate):
+        has_hub = (self.printer.lookup_object('filament_switch_sensor hub_detect', None) is not None
+                   or self.printer.lookup_object('temperature_sensor rdm_detect', None) is not None)
+
+        if not has_hub and self.head_feed_length[gate] <= 0:
             return
 
-        self.log_always(self._t('msg.wait_ace_preload'))
-        self.wait_ace_ready()
-
-        sensor = self.printer.lookup_object(
-            'filament_motion_sensor e%d_filament' % gate, None)
-
-        self._feed(gate, feed_length,
-                   self.get_feed_speed(self._active_device_index), 0)
-
-        while not self.is_ace_ready():
-            self.reactor.pause(self.reactor.monotonic() + 0.105)
+        if not has_hub:
+            feed_length = self.head_feed_length[gate]
+            self.log_always(self._t('msg.wait_ace_preload'))
+            self.wait_ace_ready()
+            sensor = self.printer.lookup_object(
+                'filament_motion_sensor e%d_filament' % gate, None)
+            self._feed(gate, feed_length,
+                       self.get_feed_speed(self._active_device_index), 0)
+            while not self.is_ace_ready():
+                self.reactor.pause(self.reactor.monotonic() + 0.105)
+                if sensor and sensor.get_status(0)['filament_detected']:
+                    self._stop_feeding(gate)
+                    self.wait_ace_ready()
+                    self.log_always(self._t('msg.filament_detected_preload'))
+                    break
             if sensor and sensor.get_status(0)['filament_detected']:
-                self._stop_feeding(gate)
-                self.wait_ace_ready()
-                self.log_always(self._t('msg.filament_detected_preload'))
-                break
+                self.log_always(self._t('msg.select_autoload_menu'))
+            return
 
-        if sensor and sensor.get_status(0)['filament_detected']:
-            self.log_always(self._t('msg.select_autoload_menu'))
+        # Single-extruder / 4-in-1 Hub Splitter: Calculate actual Bowden PTFE length & Park at Hub Gate
+        if self._is_hub_detected():
+            self.log_always('[multiACE] Hub gate already occupied by another lane - parking T%d at ACE funnel' % gate)
+            return
+        if self._is_downstream_occupied():
+            self.log_always('[multiACE] Toolhead path occupied - parking T%d at ACE funnel' % gate)
+            return
+
+        self.log_always('[multiACE] Staging T%d to hub gate & calibrating PTFE path length...' % gate)
+
+        sv = self.printer.lookup_object('save_variables', None)
+        vars = sv.get_status(None).get('variables', {}) if sv else {}
+        park_to_hub = vars.get('ace_cal_park_to_hub', [904.0, 850.6, 904.0, 954.1])
+        if isinstance(park_to_hub, (list, tuple)) and gate < len(park_to_hub):
+            try:
+                expected = float(park_to_hub[gate]) if float(park_to_hub[gate]) > 0 else 950.0
+            except (TypeError, ValueError):
+                expected = 950.0
+        else:
+            expected = 950.0
+        park_offset = float(vars.get('ace_park_offset_mm', 50.0))
+
+        approach_mm = 150.0
+        bulk = max(0.0, expected - approach_mm)
+        speed_coarse = 60
+        speed_fine = 35
+        chunk_fine = 30
+        max_mm = 1800.0
+
+        commanded = 0.0
+
+        # Bulk feed: up to approach_mm before expected hub
+        if bulk > 100.0:
+            remaining = bulk
+            while remaining > 0.0 and not self._is_hub_detected():
+                seg = min(200.0, remaining)
+                self._feed(gate, int(seg), speed_coarse, how_wait=0)
+                commanded += seg
+                remaining -= seg
+                t_end = self.reactor.monotonic() + (seg / float(speed_coarse)) + 0.5
+                while self.reactor.monotonic() < t_end:
+                    self.reactor.pause(self.reactor.monotonic() + 0.05)
+                    if self._is_hub_detected():
+                        self._stop_feeding(gate)
+                        break
+                if self._is_hub_detected():
+                    break
+
+        # Fine creep until hub switch trips
+        while commanded < max_mm and not self._is_hub_detected():
+            self._feed(gate, chunk_fine, speed_fine, how_wait=0)
+            commanded += chunk_fine
+            t_end = self.reactor.monotonic() + (chunk_fine / float(speed_fine)) + 0.5
+            while self.reactor.monotonic() < t_end:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                if self._is_hub_detected():
+                    self._stop_feeding(gate)
+                    break
+
+        if not self._is_hub_detected():
+            self.log_always('[multiACE] T%d did not reach hub after %.0f mm - releasing tension' % (gate, commanded))
+            self._retract(gate, 50, 30)
+            return
+
+        # Back off until hub switch releases
+        backed = 0.0
+        step = 15
+        while backed < max_mm and self._is_hub_detected():
+            self._retract(gate, step, 25)
+            backed += step
+            self.reactor.pause(self.reactor.monotonic() + 0.8)
+
+        # Park offset: retract park_offset_mm (50 mm) clear of 4-to-1 junction
+        self._retract(gate, int(park_offset), speed_fine)
+
+        # Calculate exact trip point
+        raw_trip = round(commanded - backed, 1)
+        if 300.0 <= raw_trip <= 2500.0:
+            ptfe_hist = vars.get('ace_cal_ptfe_history', [[], [], [], []])
+            lane_hist = list(ptfe_hist[gate]) if isinstance(ptfe_hist, (list, tuple)) and gate < len(ptfe_hist) and isinstance(ptfe_hist[gate], list) else []
+            lane_hist.append(raw_trip)
+            sz = int(vars.get('ace_cal_ptfe_history_size', 10))
+            if len(lane_hist) > sz:
+                lane_hist = lane_hist[-sz:]
+            p95 = self._compute_p95(lane_hist)
+
+            new_hist = [list(h) if isinstance(h, list) else [] for h in (ptfe_hist if isinstance(ptfe_hist, (list, tuple)) else [[], [], [], []])]
+            while len(new_hist) < 4:
+                new_hist.append([])
+            new_hist[gate] = lane_hist
+            self._save_variable('ace_cal_ptfe_history', new_hist)
+
+            new_park = [float(p) if isinstance(p, (int, float)) else 950.0 for p in (park_to_hub if isinstance(park_to_hub, (list, tuple)) else [950.0, 950.0, 950.0, 950.0])]
+            while len(new_park) < 4:
+                new_park.append(950.0)
+            new_park[gate] = p95
+            self._save_variable('ace_cal_park_to_hub', new_park)
+
+            # Update dryroll & lane position
+            datum_list = list(vars.get('ace_dryroll_datum', [0, 0, 0, 0]))
+            while len(datum_list) < 4:
+                datum_list.append(0)
+            datum_list[gate] = 1
+            self._save_variable('ace_dryroll_datum', datum_list)
+
+            rng = list(vars.get('ace_dryroll_range', [854, 826, 854, 854]))
+            while len(rng) < 4:
+                rng.append(854)
+            rng[gate] = max(int(p95 - park_offset - 50.0), 300)
+            self._save_variable('ace_dryroll_range', rng)
+
+            lane_pos = list(vars.get('ace_lane_pos', ['bowden', 'parked', 'parked', 'gate']))
+            while len(lane_pos) < 4:
+                lane_pos.append('parked')
+            lane_pos[gate] = 'parked'
+            self._save_variable('ace_lane_pos', lane_pos)
+
+            self.log_always('[PTFE] T%d calibrated: trip=%.1fmm -> rolling P95=%.1fmm (sample %d/%d: [%s]) - parked at hub gate (-%.1fmm)'
+                            % (gate, raw_trip, p95, len(lane_hist), sz,
+                               ", ".join("%.1f" % x for x in lane_hist), park_offset))
+        else:
+            self.log_always('[multiACE] T%d parked at hub gate (-%.1fmm)' % (gate, park_offset))
+
 
     def send_request(self, request, callback):
         self.send_request_to(self._active_device_index, request, callback)
@@ -6522,7 +6757,9 @@ class MultiAce:
 
     def cmd_ACE_FEED(self, gcmd):
         ace = self._manual_move_ace(gcmd)
-        index = gcmd.get_int('INDEX')
+        index = gcmd.get_int('INDEX', gcmd.get_int('T', gcmd.get_int('SLOT', None)))
+        if index is None:
+            raise self._ace_error(gcmd, 'INDEX=<slot> or T=<slot> is required', code=200)
         length = gcmd.get_int('LENGTH')
         speed = gcmd.get_int(
             'SPEED', self.get_feed_speed(
@@ -6647,7 +6884,9 @@ class MultiAce:
 
     def cmd_ACE_RETRACT(self, gcmd):
         ace = self._manual_move_ace(gcmd)
-        index = gcmd.get_int('INDEX')
+        index = gcmd.get_int('INDEX', gcmd.get_int('T', gcmd.get_int('SLOT', None)))
+        if index is None:
+            raise self._ace_error(gcmd, 'INDEX=<slot> or T=<slot> is required', code=200)
         length = gcmd.get_int('LENGTH')
         speed = gcmd.get_int(
             'SPEED', self.get_retract_speed(
@@ -13581,7 +13820,7 @@ class MultiAce:
             return None
         deadline = self.reactor.monotonic() + timeout
         while done[0] is None and self.reactor.monotonic() < deadline:
-            time.sleep(0.05)
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
         return done[0]
 
     def _tipform_rejected(self, resp):

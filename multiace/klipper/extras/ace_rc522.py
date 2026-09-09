@@ -608,15 +608,8 @@ class AceTagReader:
                     n_uid = self._known_neighbour_uid(idx, slot)
                     if n_uid and uid_a == n_uid:
                         verdict = 'neighbour'
-                    elif n_uid:
-                        verdict = 'ours'
                     else:
-                        verdict = self._rotation_test(idx, slot, uid_a,
-                                                      respond)
-                        if verdict is None:
-                            return
-                        if verdict == 'neighbour':
-                            rolled += START_PROBE_MM
+                        verdict = 'ours'
                 if verdict == 'ours':
                     respond('rc522: card %s is this slot\'s tag - reading '
                             'it' % uid_a)
@@ -700,42 +693,26 @@ class AceTagReader:
             uid_a, _bd = self._rc_stable_uid(idx, slot)
             verdict = None
             if not uid_a:
-                if not self._clear_neighbour(idx, slot, respond):
-                    try:
-                        n_busy = (ace._v2_get_slot_status(idx, neighbour)
-                                  in V2_ACTIVE_MOTION_STATES)
-                    except Exception:
-                        n_busy = False
-                    self._correct_to(idx, slot, net_target - depth, respond)
-                    if n_busy:
-                        respond('rc522: neighbour slot %d is being inserted '
-                                'right now - this read is queued behind it'
-                                % ace._disp(neighbour))
-                        return 'deferred'
-                    respond('rc522: a card already answers but its UID is '
-                            'unreadable - cannot tell it from the '
-                            'neighbour. Remove or rotate the neighbour '
-                            'spool a bit, then retry.')
-                    return
-                if self._rc_select(idx, slot):
-                    uid_a, _bd = self._rc_stable_uid(idx, slot)
-                    verdict = 'ours' if uid_a else None
-            else:
-                verdict = self._rotation_test(idx, slot, uid_a, respond)
-                if verdict is None:
-                    return
-                if verdict == 'neighbour':
-                    depth += START_PROBE_MM
-            if verdict == 'neighbour':
-                if self._clear_neighbour(idx, slot, respond):
-                    blocking_uid = ''
+                res = self._identify(idx, slot)
+                if self._answered(res):
+                    verdict = 'ours'
                 else:
-                    blocking_uid = uid_a
-                    respond('rc522: card %s is the neighbour\'s - '
-                            'listening for a different one' % uid_a)
+                    self._correct_to(idx, slot, net_target - depth, respond)
+                    respond('rc522: card detected but UID is unreadable')
+                    return
+            else:
+                n_uid = self._known_neighbour_uid(idx, slot)
+                if n_uid and uid_a == n_uid:
+                    verdict = 'neighbour'
+                else:
+                    verdict = 'ours'
+            if verdict == 'neighbour':
+                blocking_uid = uid_a
+                respond('rc522: card %s is the neighbour\'s - '
+                        'listening for a different one' % uid_a)
             elif verdict == 'ours':
                 respond('rc522: card %s is this slot\'s tag - reading it'
-                        % uid_a)
+                        % (uid_a or 'identified'))
                 depth += self._read_card(idx, slot, respond)
                 self._correct_to(idx, slot, net_target - depth, respond)
                 return
@@ -1204,43 +1181,10 @@ class AceTagReader:
         return True
 
     def _clear_neighbour(self, idx, slot, respond):
-        """Rotate the NEIGHBOUR spool until its card has left the shared
-        field: feed the neighbour lane CLEAR_STEP_MM at a time, SELECT
-        after each step, done when it stayed silent CLEAR_SILENT_STEPS
-        steps in a row. Returns True when the field is clear. A queued
-        insert of that neighbour gets its remembered depth corrected by
-        the amount moved."""
-        neighbour = slot ^ 1
-        if not self._neighbour_movable(idx, slot):
-            respond('rc522: neighbour slot %d is loaded or busy - cannot '
-                    'rotate it away' % self.ace._disp(neighbour))
-            return False
-        moved = 0
-        silent = 0
-        respond('rc522: rotating the neighbour spool (slot %d) out of the '
-                'field' % self.ace._disp(neighbour))
-        while moved < CLEAR_MAX_MM:
-            if not self._move(idx, neighbour, CLEAR_STEP_MM, SEARCH_MODE,
-                              respond):
-                break
-            moved += CLEAR_STEP_MM
-            self._pause(CLEAR_STEP_MM / float(PARK_SPEED) + 0.4)
-            if self._rc_select(idx, slot):
-                silent = 0
-            else:
-                silent += 1
-                if silent >= CLEAR_SILENT_STEPS:
-                    break
-        if moved:
-            q = getattr(self.ace, '_insert_read_queue', None) or []
-            for i, ent in enumerate(q):
-                if ent[0] == idx and ent[1] == neighbour \
-                        and isinstance(ent[2], (int, float)):
-                    q[i] = (idx, neighbour, ent[2] + moved)
-        ok = silent >= CLEAR_SILENT_STEPS
-        respond('rc522: neighbour rotated %d units - field %s'
-                % (moved, 'clear' if ok else 'STILL occupied'))
-        return ok
+        """Suppress neighbour motor rotation during multi-material operations
+        to prevent uncommanded actuation of inactive spools."""
+        respond('rc522: neighbour rotation suppressed for motion safety')
+        return False
 
     def _bind_uid(self, idx, slot, uid, respond, unbind=True):
         """Bind the slot by card UID - the uniform per-chip key. On no
