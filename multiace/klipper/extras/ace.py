@@ -3599,8 +3599,13 @@ class MultiAce:
 
     def write_variables(self):
         mmu_vars_revision = self.save_variables.allVariables.get(self.VARS_ACE_REVISION, 0) + 1
-        self.gcode.run_script_from_command(
-            f"SAVE_VARIABLE VARIABLE={self.VARS_ACE_REVISION} VALUE={mmu_vars_revision}")
+        def _do_write(et=None):
+            try:
+                self.gcode.run_script_from_command(
+                    f"SAVE_VARIABLE VARIABLE={self.VARS_ACE_REVISION} VALUE={mmu_vars_revision}")
+            except Exception:
+                pass
+        self.reactor.register_callback(_do_write)
 
     def _serial_disconnect(self):
         idx = self._active_device_index
@@ -3654,12 +3659,14 @@ class MultiAce:
             self.gate_status = gate_list
         self.ace_dev_fd = self._ace_dev_fds.get(idx)
         self.heartbeat_timer = self._heartbeat_timers.get(idx)
-        try:
-            self.gcode.run_script_from_command(
-                "SAVE_VARIABLE VARIABLE=%s VALUE=\"'%s'\"" % (
-                    self.VARS_ACE_ACTIVE_DEVICE, self.serial_id))
-        except Exception:
-            pass
+        def _do_save(et=None):
+            try:
+                self.gcode.run_script_from_command(
+                    "SAVE_VARIABLE VARIABLE=%s VALUE=\"'%s'\"" % (
+                        self.VARS_ACE_ACTIVE_DEVICE, self.serial_id))
+            except Exception:
+                pass
+        self.reactor.register_callback(_do_save)
         return True
 
     def _open_ace(self, idx, on_ready=None):

@@ -1547,6 +1547,29 @@ createApp({
       if (!_confirmCmd("ui.confirm.unload_head", {head: dispIdx(idx)})) return;
       run("ACE_UNLOAD_HEAD", {HEAD: idx});
     }
+    function unloadSlot(aceIdx, slotIdx) {
+      if (_blockIfPrinting()) return;
+      const globalSlot = (aceIdx * 4) + slotIdx;
+      if (!_confirmCmd("ui.confirm.unload_slot", {slot: dispIdx(globalSlot), ace: dispIdx(aceIdx)})) return;
+      if (state.mode === "head") {
+        const h = aceHeadForAce(aceIdx);
+        if (h !== null) {
+          enqueue("ACE_UNLOAD_HEAD", {HEAD: h});
+          return;
+        }
+      }
+      enqueue("ACE_LANE_PARK", {T: globalSlot});
+    }
+    function ejectSlot(aceIdx, slotIdx) {
+      if (_blockIfPrinting()) return;
+      const globalSlot = (aceIdx * 4) + slotIdx;
+      if (slotIsEmpty(aceIdx, slotIdx)) {
+        setMacroLog(t("ui.dashboard.slot_empty_hint", {ace: dispIdx(aceIdx), slot: dispIdx(slotIdx)}));
+        return;
+      }
+      if (!_confirmCmd("ui.confirm.eject_slot", {slot: dispIdx(globalSlot), ace: dispIdx(aceIdx)})) return;
+      enqueue("ACE_LANE_EJECT", {T: globalSlot});
+    }
     function unloadAll() {
       if (_blockIfPrinting()) return;
       if (!_confirmCmd("ui.confirm.unload_all")) return;
@@ -6350,7 +6373,7 @@ createApp({
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, cancelUnloadAll, anyUnloading, setHeadManual, setHeadFeeder, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, unloadSlot, ejectSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, cancelUnloadAll, anyUnloading, setHeadManual, setHeadFeeder, setHeadAce, headToggle, aceOptionsForHead, headAceOf, aceProtoTitle, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
       spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, sameSwatch, pickerTouch, pickerRfidSku, pickerTagFormat, pickerCodeKind, pickerUidExtra, tagFormatLabel, pickerHeadTag, headRfidBusy, headRfidNote, readHeadRfid,

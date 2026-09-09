@@ -50,13 +50,52 @@ _DEFAULT_PRINTER_DATA = os.environ.get("PRINTER_DATA") or (
 )
 _DEFAULT_CONFIG_DIR = os.environ.get("KLIPPER_CONFIG_DIR") or os.path.join(_DEFAULT_PRINTER_DATA, "config")
 _DEFAULT_EXTENDED_DIR = os.path.join(_DEFAULT_CONFIG_DIR, "extended")
-_DEFAULT_MULTIACE_DIR = os.path.join(_DEFAULT_EXTENDED_DIR, "multiace")
+
+def _resolve_cfg_path() -> Path:
+    env = os.environ.get("MULTIACE_CFG_PATH")
+    if env and Path(env).is_file():
+        return Path(env)
+
+    home_user = Path(os.path.expanduser("~"))
+    candidates = [
+        home_user / "printer_data" / "config" / "ace.cfg",
+        home_user / "printer_data" / "config" / "extended" / "ace.cfg",
+        home_user / "printer_data" / "config" / "printer.cfg",
+    ]
+
+    default_cfg_dir = Path(_DEFAULT_CONFIG_DIR)
+    for p in [
+        default_cfg_dir / "ace.cfg",
+        default_cfg_dir / "extended" / "ace.cfg",
+        default_cfg_dir / "printer.cfg",
+    ]:
+        if p not in candidates:
+            candidates.append(p)
+
+    for c in candidates:
+        if c.is_file():
+            return c
+
+    if env:
+        return Path(env)
+    return candidates[0]
+
+def _resolve_multiace_dir() -> str:
+    env = os.environ.get("MULTIACE_DIR")
+    if env:
+        return env
+    cand_direct = os.path.join(_DEFAULT_CONFIG_DIR, "multiace")
+    cand_extended = os.path.join(_DEFAULT_EXTENDED_DIR, "multiace")
+    if os.path.isdir(cand_direct):
+        return cand_direct
+    if os.path.isdir(_DEFAULT_EXTENDED_DIR):
+        return cand_extended
+    return cand_direct
+
+_DEFAULT_MULTIACE_DIR = _resolve_multiace_dir()
 
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
-MULTIACE_CFG_PATH = os.environ.get(
-    "MULTIACE_CFG_PATH",
-    os.path.join(_DEFAULT_EXTENDED_DIR, "ace.cfg"),
-)
+MULTIACE_CFG_PATH = str(_resolve_cfg_path())
 SNAPSHOT_DIR = os.environ.get(
     "MULTIACE_SNAPSHOT_DIR",
     os.path.join(_DEFAULT_MULTIACE_DIR, "filament_snapshots"),
@@ -627,6 +666,7 @@ def _parse_state(status: dict) -> dict:
             "tables":    tf.get("tables", []) or [],
         },
         "preflight_inbox": _inbox_status(),
+        "rotisserie": ace.get("rotisserie") or {},
     }
 
 async def _query_state() -> dict:
@@ -785,7 +825,7 @@ async def version() -> dict:
     return {
         "web": VERSION,
         "moonraker_url": MOONRAKER_URL,
-        "config_path": MULTIACE_CFG_PATH,
+        "config_path": str(_resolve_cfg_path()),
         "frontend_dir": FRONTEND_DIR,
         "printer": printer,
     }
@@ -1376,14 +1416,15 @@ async def preflight_livedata() -> dict:
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
 
 def _read_cfg_scalars() -> dict:
+    p = _resolve_cfg_path()
     try:
-        st = Path(MULTIACE_CFG_PATH).stat()
+        st = p.stat()
     except OSError:
         return _cfg_scalar_cache["values"]
     if st.st_mtime == _cfg_scalar_cache["mtime"]:
         return _cfg_scalar_cache["values"]
     try:
-        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8")
         main, _per_ace = _extract_params(text)
     except Exception:
         return _cfg_scalar_cache["values"]
@@ -1415,7 +1456,7 @@ def _read_update_cfg() -> dict[str, str]:
     prerelease = "0"
     url_base = ""
     try:
-        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        text = _resolve_cfg_path().read_text(encoding="utf-8")
         main, _per_ace = _extract_params(text)
         if "update_repo" in main and main["update_repo"]:
             repo = main["update_repo"]
@@ -3052,7 +3093,7 @@ async def get_tipform() -> dict:
     """The tip-forming editor state: cfg truth (mode + raw table strings)
     plus whether this build supports the feature at all."""
     mod = _load_tipform_module()
-    p = Path(MULTIACE_CFG_PATH)
+    p = _resolve_cfg_path()
     mode, tables = ("stock", {})
     if p.exists():
         mode, tables = _extract_tipform(p.read_text(encoding="utf-8"))
@@ -3089,9 +3130,9 @@ async def set_tipform(payload: TipformUpdate) -> dict:
         except ValueError as e:
             raise HTTPException(400, "table %r: %s" % (key, e))
         tables[key] = raw
-    p = Path(MULTIACE_CFG_PATH)
+    p = _resolve_cfg_path()
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {p}")
     text = p.read_text(encoding="utf-8")
     backup = p.with_suffix(p.suffix + ".bak")
     _write_cfg_atomic(backup, text)
@@ -3142,9 +3183,9 @@ def _write_cfg_atomic(path, text: str) -> None:
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    p = Path(MULTIACE_CFG_PATH)
+    p = _resolve_cfg_path()
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {p}")
     text = p.read_text(encoding="utf-8")
     main, per_ace = _extract_params(text)
     return {"path": str(p), "content": text, "params": main,
@@ -3152,9 +3193,9 @@ async def get_config() -> dict:
 
 @app.put("/api/config")
 async def update_config(payload: ConfigUpdate) -> dict:
-    p = Path(MULTIACE_CFG_PATH)
+    p = _resolve_cfg_path()
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {p}")
     if payload.base_sha1:
         cur = p.read_text(encoding="utf-8")
         cur_sha1 = _cfg_sha1(cur)

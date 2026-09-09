@@ -276,10 +276,10 @@ header h1 .hl { color: var(--accent); }
 .ace-card h2 .ace-load-all:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .ace-card h2 .ace-card-actions { display: inline-flex; align-items: center; gap: .35rem; justify-self: end; }
 .ace-card h2 .ace-dry-btn {
-  background: transparent; color: var(--muted); border: 1px solid var(--border);
-  width: 1.7rem; height: 1.7rem; border-radius: 999px; cursor: pointer;
-  font-size: .85rem; line-height: 1; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  padding: .25rem .7rem; border-radius: 4px; cursor: pointer;
+  font-size: .8rem; font-weight: 500;
+  display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
 }
 .ace-card h2 .ace-dry-btn:hover  { color: var(--accent); border-color: var(--accent); }
 .ace-card h2 .ace-dry-btn.active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
@@ -358,6 +358,19 @@ header h1 .hl { color: var(--accent); }
 }
 .slot-load-btn.reload:hover:not(:disabled) { background: #d4880f; border-color: #d4880f; }
 @keyframes reload-pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+.slot-sub-actions { display: flex; gap: .25rem; width: 100%; margin-top: .15rem; }
+.slot-action-btn {
+  flex: 1; min-width: 0;
+  background: var(--card); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: .25rem .2rem; font-size: .75rem; cursor: pointer; font-family: inherit;
+  text-align: center; line-height: 1.2;
+}
+.slot-action-btn:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.slot-action-btn.warn:hover:not(:disabled) { background: var(--danger, #e53935); color: #fff; border-color: var(--danger, #e53935); }
+.slot-action-btn.eject-btn:hover:not(:disabled) { background: #b9770e; color: #fff; border-color: #b9770e; }
+.slot-action-btn:disabled { opacity: .35; cursor: not-allowed; }
+.panel-btn.eject-btn:hover:not(:disabled) { background: #b9770e; color: #fff; border-color: #b9770e; }
 button.slot {
   /* FIXED height, deliberately NOT aspect-ratio (was 1/1.5 until
      2026-08-09). The ratio derived the height from the width, so the tile
