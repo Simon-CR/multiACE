@@ -423,7 +423,7 @@ class AceBgSwap:
             if not wait:
                 return True
             st = self._wait_rollback_done(ace, ace_idx, slot, length, speed)
-            if st.startswith('DROPPED') or st == 'TIMEOUT':
+            if st.startswith('DROPPED') or st == 'TIMEOUT' or st == 'rollback_error':
                 self._say('unwind %dmm attempt %d: device %s - retry'
                           % (length, attempt, st))
                 self._pause(2.0)

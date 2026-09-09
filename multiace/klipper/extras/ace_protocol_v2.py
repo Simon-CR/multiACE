@@ -487,11 +487,16 @@ class AceProtocolV2(AceProtocol):
                 if wtype != 2:
                     continue
                 fi = pb_decode(fi_payload)
+                dec = _fval(fi, 3, 0)
+                if dec >= (1 << 63):
+                    dec -= (1 << 64)
                 slots.append({
                     'index': len(slots),
                     'steps': _fval(fi, 1, 0),
                     'length': _fval(fi, 2, 0),
-                    'decoder': _fval(fi, 3, 0),
+                    'decoder': dec,
+                    'decoder_pulses': dec,
+                    'magnitude_mm': round(_fval(fi, 2, 0) / 100.0, 2) if _fval(fi, 2, 0) > 0 else 0.0,
                 })
             ret['result'] = {'feed_info': slots}
         elif cmd == Cmd.GET_KEY_STATE:
