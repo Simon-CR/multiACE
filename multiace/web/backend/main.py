@@ -44,18 +44,26 @@ from pydantic import BaseModel
 
 import preflight_core
 
+_DEFAULT_PRINTER_DATA = os.environ.get("PRINTER_DATA") or (
+    "/home/lava/printer_data" if os.path.isdir("/home/lava/printer_data") else
+    os.path.join(os.path.expanduser("~"), "printer_data")
+)
+_DEFAULT_CONFIG_DIR = os.environ.get("KLIPPER_CONFIG_DIR") or os.path.join(_DEFAULT_PRINTER_DATA, "config")
+_DEFAULT_EXTENDED_DIR = os.path.join(_DEFAULT_CONFIG_DIR, "extended")
+_DEFAULT_MULTIACE_DIR = os.path.join(_DEFAULT_EXTENDED_DIR, "multiace")
+
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
 MULTIACE_CFG_PATH = os.environ.get(
     "MULTIACE_CFG_PATH",
-    "/home/lava/printer_data/config/extended/ace.cfg",
+    os.path.join(_DEFAULT_EXTENDED_DIR, "ace.cfg"),
 )
 SNAPSHOT_DIR = os.environ.get(
     "MULTIACE_SNAPSHOT_DIR",
-    "/home/lava/printer_data/config/extended/multiace/filament_snapshots",
+    os.path.join(_DEFAULT_MULTIACE_DIR, "filament_snapshots"),
 )
 OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
-    "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
+    os.path.join(_DEFAULT_MULTIACE_DIR, "slot_overrides.json"),
 )
 FILAMENT_PARAMS_PATHS = tuple(
     os.environ.get(
@@ -1788,7 +1796,7 @@ async def run_macro_batch(req: MacroBatchRequest) -> dict:
 
 SPOOL_DB_PATH = os.environ.get(
     "MULTIACE_SPOOL_DB",
-    "/home/lava/printer_data/config/persistent/multiace_spools.json")
+    os.path.join(_DEFAULT_CONFIG_DIR, "persistent", "multiace_spools.json"))
 
 @app.get("/api/spools/export")
 async def export_spools() -> Response:
