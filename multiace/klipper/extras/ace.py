@@ -2444,6 +2444,9 @@ class MultiAce:
         q = getattr(self, '_insert_read_queue', None)
         if not q:
             return
+        if self._is_actively_printing() or self._swap_in_progress:
+            logging.info('[multiACE] [insert-read] cannot drain queue yet - print/swap still active')
+            return
         idx, slot, depth = q.pop(0)
         logging.info('[multiACE] [insert-read] draining queue: ACE %d '
                      'slot %d next (depth=%s)' % (idx, slot, depth))
@@ -2455,6 +2458,24 @@ class MultiAce:
             self.reactor.register_async_callback(
                 (lambda et, a=idx, g=slot, d=depth:
                  self._insert_tag_read_safe(a, g, d)))
+
+    def _insert_grab_and_defer(self, idx, slot):
+        """Allow the feed gears to bite the filament tip (INSERT_GRAB_MM ~ 20mm),
+        immediately clamp/stop the motor, and queue the full preload/tag-scan
+        for when the active print or motion completes cleanly.
+        Allows the human to insert filament, feel the gears bite, and walk away."""
+        logging.info('[multiACE] [insert-grab] ACE %d slot %d inserted while another '
+                     'lane is active. Executing bite-and-clamp so human can walk away.'
+                     % (self._disp(idx), self._disp(slot)))
+        depth = self._insert_verified_abort(idx, slot)
+        if not hasattr(self, '_insert_read_queue'):
+            self._insert_read_queue = []
+        if not any(q[0] == idx and q[1] == slot for q in self._insert_read_queue):
+            self._insert_read_queue.append((idx, slot, depth))
+            self.log_always(
+                '[multiACE] ACE %d Slot %d: Grabbed tip (%s mm) and clamped. '
+                'Full preload deferred until print finishes.'
+                % (self._disp(idx), self._disp(slot), depth))
 
     def _insert_verified_abort(self, idx, slot):
         """Stop the firmware insert procedure and VERIFY it stayed stopped.
@@ -3072,6 +3093,7 @@ class MultiAce:
             self._audit_state('PRINT_END', {
                 'action': 'feed_assist_disabled',
             })
+        self._insert_drain_queue()
 
     def _color_message(self, msg):
         try:
@@ -5879,11 +5901,16 @@ class MultiAce:
                         now_empty = self._is_empty_status(new_slot.get('status'))
                         if was_empty != now_empty:
                             display_refresh_needed = True
+                    is_busy_elsewhere = (
+                        self._is_actively_printing()
+                        or self._swap_in_progress
+                        or any(self._v2_get_slot_status(idx, s) in V2_ACTIVE_MOTION_STATES
+                               for s in range(4) if s != i)
+                    )
                     if (is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
                             and not self._is_empty_status(new_slot.get('status'))
-                            and not self._swap_in_progress
-                            and not self._is_actively_printing()):
+                            and not is_busy_elsewhere):
                         self.log_always(self._t('msg.auto_feed'))
                         if (getattr(self, 'rc522', False)
                                 and self._is_v2_idx(idx)
@@ -5897,11 +5924,10 @@ class MultiAce:
                     elif (is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
                             and not self._is_empty_status(new_slot.get('status'))
-                            and not self._swap_in_progress
-                            and self._is_actively_printing()):
-                        logging.info('[multiACE] slot insert on ACE %d slot %d '
-                                     'during print - pre-load deferred (not '
-                                     'while actively printing)' % (idx, i))
+                            and is_busy_elsewhere):
+                        self.reactor.register_async_callback(
+                            (lambda et, a=idx, g=i:
+                             self._insert_grab_and_defer(a, g)))
                     elif (getattr(self, 'rc522', False) and self._is_v2_idx(idx)
                             and self._is_open_fw_idx(idx)
                             and not is_active
