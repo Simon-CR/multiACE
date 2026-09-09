@@ -1939,6 +1939,11 @@ class MultiAce:
                     self._wrap_set_print_filament_config,
                     desc='[multiACE] wrap SET_PRINT_FILAMENT_CONFIG to '
                          'capture display edits as picker overrides')
+            else:
+                self.gcode.register_command(
+                    'SET_PRINT_FILAMENT_CONFIG',
+                    lambda gcmd: None,
+                    desc='[multiACE] dummy SET_PRINT_FILAMENT_CONFIG on non-U1 Klipper')
         except Exception as e:
             logging.info(
                 '[multiACE] failed to wrap SET_PRINT_FILAMENT_CONFIG: %s' % e)
@@ -2334,6 +2339,7 @@ class MultiAce:
                          'running - re-insert ignored' % (idx, slot))
             return
         self._insert_read_running.add(key)
+        self._lane_setup_busy = True
         ok = False
         try:
             ok = bool(self._insert_uid_read(idx, slot, depth))
@@ -2342,6 +2348,7 @@ class MultiAce:
         except Exception:
             logging.exception('[multiACE] insert read / pre-load')
         finally:
+            self._lane_setup_busy = False
             self._insert_read_running.discard(key)
             if ok:
                 self._insert_drain_queue()
@@ -5272,6 +5279,67 @@ class MultiAce:
                     reg[(idx, slot)] = ent['uid']
                 self._v2_filament_info_per_ace.setdefault(idx, {})[slot] = info
                 n += 1
+            # Fallback to ace_inventory_0 or ace_gate_map for existing spools
+            inv = self.save_variables.allVariables.get('ace_inventory_0', None)
+            if isinstance(inv, list):
+                for slot, item in enumerate(inv):
+                    if slot >= 4 or not isinstance(item, dict):
+                        continue
+                    key = '0_%d' % slot
+                    if isinstance(sv, dict) and key in sv:
+                        continue
+                    if 0 in self._v2_filament_info_per_ace and slot in self._v2_filament_info_per_ace[0]:
+                        continue
+                    mat = item.get('material')
+                    if mat and mat != 'Unknown':
+                        c = item.get('color') or [0, 0, 0]
+                        info = {
+                            'type': mat,
+                            'color': list(c),
+                            'brand': item.get('brand', ''),
+                            'sku': item.get('sku', ''),
+                            'subtype': item.get('subtype', ''),
+                            'host': True,
+                            'fmt': item.get('tag_format', 'openspool'),
+                        }
+                        if item.get('uid'):
+                            info['uid'] = item['uid']
+                        self._v2_filament_info_per_ace.setdefault(0, {})[slot] = info
+                        n += 1
+            gm = self.save_variables.allVariables.get('ace_gate_map', None)
+            if isinstance(gm, dict):
+                for slot_str, g_data in gm.items():
+                    try:
+                        slot = int(slot_str)
+                    except ValueError:
+                        continue
+                    if slot >= 4 or not isinstance(g_data, dict):
+                        continue
+                    key = '0_%d' % slot
+                    if isinstance(sv, dict) and key in sv:
+                        continue
+                    if 0 in self._v2_filament_info_per_ace and slot in self._v2_filament_info_per_ace[0]:
+                        continue
+                    mat = g_data.get('material')
+                    if mat:
+                        hex_c = g_data.get('color', '000000')
+                        try:
+                            r = int(hex_c[0:2], 16)
+                            g = int(hex_c[2:4], 16)
+                            b = int(hex_c[4:6], 16)
+                        except Exception:
+                            r, g, b = 0, 0, 0
+                        info = {
+                            'type': mat,
+                            'color': [r, g, b],
+                            'brand': g_data.get('name', ''),
+                            'sku': 'SM%s' % g_data.get('spool_id', ''),
+                            'subtype': '',
+                            'host': True,
+                            'fmt': 'spoolman',
+                        }
+                        self._v2_filament_info_per_ace.setdefault(0, {})[slot] = info
+                        n += 1
             if n:
                 logging.info('[multiACE] [rc522] %d host tag read(s) '
                              'restored from save_variables' % n)
@@ -5915,6 +5983,7 @@ class MultiAce:
                     is_busy_elsewhere = (
                         self._is_actively_printing()
                         or self._swap_in_progress
+                        or getattr(self, '_lane_setup_busy', False)
                     )
                     if (is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
