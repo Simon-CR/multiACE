@@ -2324,6 +2324,28 @@ class MultiAce:
             return False
         return bool(fw) and fw.strip().upper().endswith('O')
 
+    def _needs_insert_abort(self, idx):
+        """Returns True if the Open Firmware is legacy (< V1.1.46O) and requires
+        the host to abort the insert procedure for a host-side tag sweep.
+        Modern ACE2-Open firmware (V1.1.46O+) has native on-chip decoding
+        (OpenSpool, Spoolman, Bambu Lab, Creality, Prusament) and autonomous
+        parking; aborting it breaks on-chip tag decoding."""
+        if not self._is_open_fw_idx(idx):
+            return False
+        try:
+            fw = (self._ace_models.get(idx) or ('', ''))[1]
+            if bool(fw):
+                clean = fw.strip().upper()
+                if clean.startswith('V'):
+                    parts = clean[1:].rstrip('O').split('.')
+                    if len(parts) >= 3:
+                        major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+                        if major > 1 or (major == 1 and minor > 1) or (major == 1 and minor == 1 and patch >= 46):
+                            return False
+        except Exception:
+            pass
+        return True
+
     def _insert_read_then_preload(self, idx, slot, depth='auto'):
         """C flow (Dirk 2026-09-01), ACTIVE ACE: verified abort of the
         firmware insert procedure -> UID-first transport-sweep read ->
@@ -5992,7 +6014,7 @@ class MultiAce:
                         self.log_always(self._t('msg.auto_feed'))
                         if (getattr(self, 'rc522', False)
                                 and self._is_v2_idx(idx)
-                                and self._is_open_fw_idx(idx)):
+                                and self._needs_insert_abort(idx)):
                             self.reactor.register_async_callback(
                                 (lambda et, a=idx, g=i:
                                  self._insert_read_then_preload(a, g)))
@@ -6007,7 +6029,7 @@ class MultiAce:
                             (lambda et, a=idx, g=i:
                              self._insert_grab_and_defer(a, g)))
                     elif (getattr(self, 'rc522', False) and self._is_v2_idx(idx)
-                            and self._is_open_fw_idx(idx)
+                            and self._needs_insert_abort(idx)
                             and not is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
                             and not self._is_empty_status(new_slot.get('status'))
@@ -6413,6 +6435,16 @@ class MultiAce:
                               % (t, cur, p95, len(samples), samples_str))
 
     def _pre_load(self, gate):
+        was_busy = getattr(self, '_lane_setup_busy', False)
+        self._lane_setup_busy = True
+        try:
+            self._do_pre_load(gate)
+        finally:
+            if not was_busy:
+                self._lane_setup_busy = False
+                self._insert_drain_queue()
+
+    def _do_pre_load(self, gate):
         has_hub = (self.printer.lookup_object('filament_switch_sensor hub_detect', None) is not None
                    or self.printer.lookup_object('temperature_sensor rdm_detect', None) is not None)
 
@@ -6439,6 +6471,7 @@ class MultiAce:
             return
 
         # Single-extruder / 4-in-1 Hub Splitter: Calculate actual Bowden PTFE length & Park at Hub Gate
+        self.wait_ace_ready()
         if self._is_hub_detected():
             self.log_always('[multiACE] Hub gate already occupied by another lane - parking T%d at ACE funnel' % gate)
             return
