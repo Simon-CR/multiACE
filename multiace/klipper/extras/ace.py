@@ -153,6 +153,11 @@ INSERT_GRAB_MM = 20
 INSERT_GRAB_WAIT_S = 8.0
 WAIT_ACE_FEEDING_MAX = 4
 
+CRUSH_GUARD_MIN_FEED_MM = 20.0
+CRUSH_GUARD_SLIP_RATIO = 0.20
+CRUSH_GUARD_POLL_INTERVAL = 0.20
+DEC_MM_PER_COUNT = 1.2342
+
 FA_HOMING_SETTLE = 0.5
 
 ACE_OPEN_TIMEOUT = 8.0
@@ -2641,6 +2646,60 @@ class MultiAce:
         while not box['done'] and self.reactor.monotonic() < deadline:
             self.reactor.pause(self.reactor.monotonic() + 0.02)
         return box['d']
+
+    def _read_feed_info(self, idx, slot):
+        """[diag] Synchronous V2 Command 76 (get_feed_info) read for a slot.
+        Returns dict with keys 'steps', 'length', 'decoder', 'decoder_pulses'
+        or None if V1, missing, or communication failed."""
+        try:
+            if not self._is_v2_idx(idx):
+                return None
+        except Exception:
+            return None
+        box = {'info': None, 'done': False}
+        def _cb(self, response, _b=box, _slot=slot):
+            try:
+                fi = ((response or {}).get('result') or {}).get(
+                    'feed_info') or []
+                for s in fi:
+                    if int(s.get('index', -1)) == _slot:
+                        _dv = int(s.get('decoder', s.get('decoder_pulses', 0)))
+                        if _dv >= (1 << 63):
+                            _dv -= (1 << 64)
+                        _b['info'] = {
+                            'steps': int(s.get('steps', 0)),
+                            'length': int(s.get('length', 0)),
+                            'decoder': _dv,
+                            'decoder_pulses': _dv,
+                        }
+                        break
+            except Exception:
+                pass
+            _b['done'] = True
+        try:
+            self.send_request_to(idx, {'method': 'get_feed_info'}, _cb)
+        except Exception:
+            return None
+        deadline = self.reactor.monotonic() + 1.0
+        while not box['done'] and self.reactor.monotonic() < deadline:
+            self.reactor.pause(self.reactor.monotonic() + 0.02)
+        return box['info']
+
+    def _check_feed_slip(self, idx, slot, cmd_mm, dec_mm,
+                         min_threshold=CRUSH_GUARD_MIN_FEED_MM,
+                         slip_ratio_threshold=CRUSH_GUARD_SLIP_RATIO):
+        """Evaluate slip between commanded feed mm and optical decoder mm.
+        Returns True if slip/crush condition detected on V2 hardware."""
+        try:
+            if not self._is_v2_idx(idx):
+                return False
+        except Exception:
+            return False
+        if cmd_mm is None or dec_mm is None:
+            return False
+        if cmd_mm < min_threshold:
+            return False
+        return dec_mm < (slip_ratio_threshold * cmd_mm)
 
     def _retract_with_decoder_span(self, idx, slot, retract_fn):
         """[diag] Run retract_fn() while sampling the V2 decoder every ~100ms
@@ -6507,28 +6566,30 @@ class MultiAce:
             remaining = bulk
             while remaining > 0.0 and not self._is_hub_detected():
                 seg = min(200.0, remaining)
-                self._feed(gate, int(seg), speed_coarse, how_wait=0)
-                commanded += seg
-                remaining -= seg
-                t_end = self.reactor.monotonic() + (seg / float(speed_coarse)) + 0.5
-                while self.reactor.monotonic() < t_end:
-                    self.reactor.pause(self.reactor.monotonic() + 0.05)
-                    if self._is_hub_detected():
-                        self._stop_feeding(gate)
-                        break
+                ok, cmd_mm, dec_mm = self._step_feed(
+                    gate, int(seg), speed_coarse, ace=self._active_device_index,
+                    step_size=int(seg), check_fn=self._is_hub_detected)
+                commanded += cmd_mm
+                remaining -= cmd_mm
+                if not ok:
+                    self.log_always(
+                        '[multiACE] Bulk feed aborted on slip/crush guard '
+                        '(commanded %.1fmm, moved %.1fmm)' % (cmd_mm, dec_mm))
+                    break
                 if self._is_hub_detected():
                     break
 
         # Fine creep until hub switch trips
         while commanded < max_mm and not self._is_hub_detected():
-            self._feed(gate, chunk_fine, speed_fine, how_wait=0)
-            commanded += chunk_fine
-            t_end = self.reactor.monotonic() + (chunk_fine / float(speed_fine)) + 0.5
-            while self.reactor.monotonic() < t_end:
-                self.reactor.pause(self.reactor.monotonic() + 0.05)
-                if self._is_hub_detected():
-                    self._stop_feeding(gate)
-                    break
+            ok, cmd_mm, dec_mm = self._step_feed(
+                gate, chunk_fine, speed_fine, ace=self._active_device_index,
+                step_size=chunk_fine, check_fn=self._is_hub_detected)
+            commanded += cmd_mm
+            if not ok:
+                self.log_always(
+                    '[multiACE] Fine creep aborted on slip/crush guard '
+                    '(commanded %.1fmm, moved %.1fmm)' % (cmd_mm, dec_mm))
+                break
 
         if not self._is_hub_detected():
             self.log_always('[multiACE] T%d did not reach hub after %.0f mm - releasing tension' % (gate, commanded))
@@ -6820,13 +6881,252 @@ class MultiAce:
 
         self._disable_feed_assist(index)
 
-    def _feed(self, index, length, speed, how_wait=None, ace=None):
+    def _feed_filament_with_crush_guard(self, slot, length, speed, ace=None,
+                                        check_fn=None,
+                                        min_threshold=CRUSH_GUARD_MIN_FEED_MM,
+                                        slip_ratio_threshold=CRUSH_GUARD_SLIP_RATIO,
+                                        poll_interval=CRUSH_GUARD_POLL_INTERVAL,
+                                        raise_on_slip=False):
+        """Execute a feed move with Command 76 slip comparator / crush guard.
+
+        On V2 hardware, samples Command 76 (get_feed_info) during the feed.
+        If commanded distance exceeds min_threshold (default >= 20mm) and
+        optical decoder delta indicates less than 20% of commanded movement,
+        immediately commands stop_feed_filament on that slot to prevent
+        filament crushing / gear grinding (Issue #116).
+
+        Returns: (success: bool, commanded_mm: float, moved_mm: float)
+        """
+        idx = self._active_device_index if ace is None else int(ace)
+        slot = int(slot)
+        speed = max(1, int(speed))
+        length = max(0, int(length))
+        if length <= 0:
+            return True, 0.0, 0.0
+
+        try:
+            is_v2 = self._is_v2_idx(idx)
+        except Exception:
+            is_v2 = False
+
+        if not is_v2:
+            # Fail safe for V1 hardware: execute standard feed without false-positive halts
+            self.wait_ace_ready_on(idx)
+            self.send_request_to(
+                idx,
+                request={"method": "feed_filament",
+                         "params": {"index": slot, "length": length, "speed": speed}},
+                callback=lambda s, r: None)
+            t_end = self.reactor.monotonic() + (float(length) / float(speed)) + 0.1
+            while self.reactor.monotonic() < t_end:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                if check_fn and check_fn():
+                    self._stop_feeding(slot, idx=idx)
+                    break
+            return True, float(length), float(length)
+
+        box = {
+            'first_decoder': None,
+            'last_decoder': None,
+            'min_decoder': None,
+            'max_decoder': None,
+            'first_steps': None,
+            'last_steps': None,
+            'min_steps': None,
+            'max_steps': None,
+            'samples': 0,
+            'slip_detected': False,
+            'cmd_mm': 0.0,
+            'dec_mm': 0.0,
+        }
+
+        def _cb(self, response, _b=box, _slot=slot):
+            try:
+                fi = ((response or {}).get('result') or {}).get(
+                    'feed_info') or []
+                for s in fi:
+                    if int(s.get('index', -1)) == _slot:
+                        dv = int(s.get('decoder', s.get('decoder_pulses', 0)))
+                        if dv >= (1 << 63):
+                            dv -= (1 << 64)
+                        st = int(s.get('steps', 0))
+                        if _b['first_decoder'] is None:
+                            _b['first_decoder'] = dv
+                        if _b['first_steps'] is None:
+                            _b['first_steps'] = st
+                        _b['last_decoder'] = dv
+                        _b['last_steps'] = st
+                        _b['min_decoder'] = dv if _b['min_decoder'] is None else min(_b['min_decoder'], dv)
+                        _b['max_decoder'] = dv if _b['max_decoder'] is None else max(_b['max_decoder'], dv)
+                        _b['min_steps'] = st if _b['min_steps'] is None else min(_b['min_steps'], st)
+                        _b['max_steps'] = st if _b['max_steps'] is None else max(_b['max_steps'], st)
+                        _b['samples'] += 1
+                        break
+            except Exception:
+                pass
+
+        def _tick(eventtime, _idx=idx):
+            try:
+                self.send_request_to(_idx, {'method': 'get_feed_info'}, _cb)
+            except Exception:
+                pass
+            return eventtime + poll_interval
+
+        self.wait_ace_ready_on(idx)
+        timer = self.reactor.register_timer(_tick, self.reactor.NOW)
+        feed_err = [None]
+        stopped_early = False
+        start_time = None
+
+        def _feed_cb(self, response, _err=feed_err):
+            if response and response.get('code', 0) != 0:
+                _err[0] = response.get('msg') or 'ACE rejected feed'
+
+        try:
+            self.reactor.pause(self.reactor.monotonic() + 0.02)
+            try:
+                self.send_request_to(
+                    idx,
+                    request={"method": "feed_filament",
+                             "params": {"index": slot, "length": length, "speed": speed}},
+                    callback=_feed_cb)
+            except Exception as e:
+                logging.error('[multiACE] failed to dispatch feed_filament: %s' % e)
+                return False, 0.0, 0.0
+
+            start_time = self.reactor.monotonic()
+            expected_dur = float(length) / float(speed)
+            timeout = start_time + expected_dur + 1.5
+
+            while self.reactor.monotonic() < timeout:
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                now = self.reactor.monotonic()
+                elapsed = max(0.0, now - start_time)
+                cmd_mm = min(float(length), elapsed * float(speed))
+
+                if check_fn and check_fn():
+                    self._stop_feeding(slot, idx=idx)
+                    stopped_early = True
+                    break
+
+                if feed_err[0]:
+                    logging.warning('[multiACE] feed error on ACE %d slot %d: %s'
+                                    % (idx, slot, feed_err[0]))
+                    break
+
+                # Crush guard evaluation during move
+                if box['samples'] >= 2 and box['min_decoder'] is not None:
+                    span = max(0, box['max_decoder'] - box['min_decoder'])
+                    delta = abs(box['last_decoder'] - box['first_decoder']) if (
+                        box['last_decoder'] is not None and box['first_decoder'] is not None) else 0
+                    raw_span = max(span, delta)
+                    dec_mm = float(raw_span) * DEC_MM_PER_COUNT
+
+                    if cmd_mm >= min_threshold and dec_mm < (slip_ratio_threshold * cmd_mm):
+                        box['slip_detected'] = True
+                        box['cmd_mm'] = cmd_mm
+                        box['dec_mm'] = dec_mm
+                        self._stop_feeding(slot, idx=idx)
+                        msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
+                               'commanded %gmm, moved %gmm'
+                               % (idx, slot, round(cmd_mm, 1), round(dec_mm, 1)))
+                        self.log_warn('[multiACE] %s' % msg)
+                        logging.warning('[multiACE] %s' % msg)
+                        if raise_on_slip:
+                            raise self._ace_error(None, msg, code=210)
+                        return False, cmd_mm, dec_mm
+
+                if elapsed >= expected_dur:
+                    break
+        finally:
+            try:
+                self.reactor.unregister_timer(timer)
+            except Exception:
+                pass
+
+        if start_time is None:
+            return False, 0.0, 0.0
+
+        now = self.reactor.monotonic()
+        elapsed = max(0.0, now - start_time)
+        cmd_mm = min(float(length), elapsed * float(speed))
+        dec_mm = 0.0
+        if box['min_decoder'] is not None and box['max_decoder'] is not None:
+            span = max(0, box['max_decoder'] - box['min_decoder'])
+            delta = abs(box['last_decoder'] - box['first_decoder']) if (
+                box['last_decoder'] is not None and box['first_decoder'] is not None) else 0
+            raw_span = max(span, delta)
+            dec_mm = float(raw_span) * DEC_MM_PER_COUNT
+
+        if not stopped_early and box['samples'] >= 2 and cmd_mm >= min_threshold:
+            if dec_mm < (slip_ratio_threshold * cmd_mm):
+                box['slip_detected'] = True
+                self._stop_feeding(slot, idx=idx)
+                msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
+                       'commanded %gmm, moved %gmm'
+                       % (idx, slot, round(cmd_mm, 1), round(dec_mm, 1)))
+                self.log_warn('[multiACE] %s' % msg)
+                logging.warning('[multiACE] %s' % msg)
+                if raise_on_slip:
+                    raise self._ace_error(None, msg, code=210)
+                return False, cmd_mm, dec_mm
+
+        return True, cmd_mm, dec_mm
+
+    def _step_feed(self, slot, length, speed, ace=None, step_size=50,
+                   check_fn=None, min_threshold=CRUSH_GUARD_MIN_FEED_MM,
+                   slip_ratio_threshold=CRUSH_GUARD_SLIP_RATIO,
+                   raise_on_slip=False):
+        """Execute stepped feed execution with active crush guard / slip comparator.
+
+        Splits feed movement into segments up to `step_size` mm (or single move
+        if length <= step_size), polling Command 76 telemetry during each segment.
+        If commanded distance exceeds min_threshold and decoder movement is < 20%,
+        stops feed immediately to prevent filament crushing (Issue #116).
+
+        Returns: (success: bool, commanded_total: float, moved_total: float)
+        """
+        remaining = float(length)
+        cmd_total = 0.0
+        mov_total = 0.0
+        idx = self._active_device_index if ace is None else int(ace)
+        step_sz = max(10, int(step_size))
+
+        while remaining > 0.0:
+            if check_fn and check_fn():
+                break
+            seg = min(float(step_sz), remaining)
+            ok, cmd_mm, dec_mm = self._feed_filament_with_crush_guard(
+                slot, int(seg), speed, ace=idx, check_fn=check_fn,
+                min_threshold=min_threshold,
+                slip_ratio_threshold=slip_ratio_threshold,
+                raise_on_slip=raise_on_slip)
+            cmd_total += cmd_mm
+            mov_total += dec_mm
+            if not ok:
+                return False, cmd_total, mov_total
+            remaining -= cmd_mm
+            if check_fn and check_fn():
+                break
+
+        return True, cmd_total, mov_total
+
+    def _feed(self, index, length, speed, how_wait=None, ace=None, crush_guard=False):
+        idx = self._active_device_index if ace is None else int(ace)
+        if crush_guard and how_wait is None:
+            try:
+                if self._is_v2_idx(idx):
+                    ok, cmd_mm, dec_mm = self._feed_filament_with_crush_guard(
+                        index, length, speed, ace=idx)
+                    return ok
+            except Exception:
+                pass
+
         def callback(self, response):
             if response.get('code', 0) != 0:
                 self.log_error(self._t('msg.ace_error_generic', error=response.get('msg')))
                 return
 
-        idx = self._active_device_index if ace is None else int(ace)
         self.wait_ace_ready_on(idx)
         self.send_request_to(
             idx,
@@ -6874,7 +7174,7 @@ class MultiAce:
         if speed <= 0:
             raise self._ace_error(gcmd, 'Wrong speed', code=200)
 
-        self._feed(index, length, speed, ace=ace)
+        self._feed(index, length, speed, ace=ace, crush_guard=True)
 
     def _retract(self, index, length, speed, head=None, ace=None):
         def callback(self, response):
@@ -7556,6 +7856,23 @@ class MultiAce:
                 move['next_decoder_sample'] = eventtime + 0.25
                 self._calibration_sample_decoder(
                     idx, c['slot'], c['session_id'], move['id'])
+                if state == 'verifying_feed':
+                    elapsed = max(0.0, eventtime - float(move['started']))
+                    cmd_mm = min(float(move['length']), elapsed * float(move['speed']))
+                    dmin = move.get('decoder_min')
+                    dmax = move.get('decoder_max')
+                    if dmin is not None and dmax is not None and cmd_mm >= CRUSH_GUARD_MIN_FEED_MM:
+                        dec_mm = float(max(0, dmax - dmin)) * DEC_MM_PER_COUNT
+                        if dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
+                            self._calibration_send_stop()
+                            msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
+                                   'commanded %gmm, moved %gmm'
+                                   % (idx, c['slot'], round(cmd_mm, 1), round(dec_mm, 1)))
+                            self.log_warn('[multiACE] %s' % msg)
+                            logging.warning('[multiACE] %s' % msg)
+                            self._calibration_fail(msg)
+                            self._calibration_timer = None
+                            return self.reactor.NEVER
             elapsed = eventtime - move['started']
             expected = float(move['length']) / max(float(move['speed']), 1.)
             ready = (self._info_per_ace.get(idx, {}) or {}).get(
@@ -7674,6 +7991,23 @@ class MultiAce:
                 move['next_decoder_sample'] = eventtime + 0.25
                 self._calibration_sample_decoder(
                     idx, slot, c['session_id'], move['id'])
+                if state == 'feeding':
+                    elapsed = max(0.0, eventtime - float(move['started']))
+                    cmd_mm = min(float(move['length']), elapsed * float(move['speed']))
+                    dmin = move.get('decoder_min')
+                    dmax = move.get('decoder_max')
+                    if dmin is not None and dmax is not None and cmd_mm >= CRUSH_GUARD_MIN_FEED_MM:
+                        dec_mm = float(max(0, dmax - dmin)) * DEC_MM_PER_COUNT
+                        if dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
+                            self._calibration_send_stop()
+                            msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
+                                   'commanded %gmm, moved %gmm'
+                                   % (idx, slot, round(cmd_mm, 1), round(dec_mm, 1)))
+                            self.log_warn('[multiACE] %s' % msg)
+                            logging.warning('[multiACE] %s' % msg)
+                            self._calibration_fail(msg)
+                            self._calibration_timer = None
+                            return self.reactor.NEVER
             elapsed = eventtime - move['started']
             info = self._info_per_ace.get(idx, {}) or {}
             ready = info.get('status') == 'ready'

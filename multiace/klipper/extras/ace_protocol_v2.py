@@ -564,14 +564,16 @@ class AceProtocolV2(AceProtocol):
                 'color': [0, 0, 0],
             })
 
-        dry_status = {'status': 'stop', 'target_temp': 0,
+        dry_status = {'status': 'stop', 'raw_status': 0, 'target_temp': 0,
                       'duration': 0, 'remain_time': 0}
         for wtype, dry_payload in fields.get(2, []):
             if wtype != 2:
                 continue
             dsub = pb_decode(dry_payload)
+            raw_status = _fval(dsub, 1, 0)
             dry_status = {
-                'status': DRY_STATES.get(_fval(dsub, 1, 0), 'stop'),
+                'status': DRY_STATES.get(raw_status & 0x0F, 'stop'),
+                'raw_status': raw_status,
                 'target_temp': _fval(dsub, 2, 0),
                 'duration': _fval(dsub, 3, 0),
                 'remain_time': _fval(dsub, 4, 0),
