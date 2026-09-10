@@ -80,6 +80,34 @@ def _resolve_cfg_path() -> Path:
         return Path(env)
     return candidates[0]
 
+def _resolve_klipper_extras(filename: str) -> list[str]:
+    home = Path(os.path.expanduser("~"))
+    return [
+        f"/home/lava/klipper/klippy/extras/{filename}",
+        str(home / f"klipper/klippy/extras/{filename}"),
+        f"/usr/share/klipper/klippy/extras/{filename}"
+    ]
+
+def _resolve_update_script() -> str | None:
+    home = Path(os.path.expanduser("~"))
+    candidates = [
+        Path("/home/lava/multiace_update.sh"),
+        Path("/home/lava/multiace/tools/multiace_update.sh"),
+        home / "multiace_update.sh",
+        home / "multiace/tools/multiace_update.sh",
+        Path(__file__).resolve().parent.parent.parent / "tools" / "multiace_update.sh"
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+def _resolve_tool_script(filename: str) -> list[str]:
+    return [
+        f"/home/lava/printer_data/config/tools/{filename}",
+        str(Path(__file__).resolve().parent.parent.parent / "tools" / filename)
+    ]
+
 def _resolve_multiace_dir() -> str:
     env = os.environ.get("MULTIACE_DIR")
     if env:
@@ -105,12 +133,8 @@ OVERRIDE_FILE = os.environ.get(
     os.path.join(_DEFAULT_MULTIACE_DIR, "slot_overrides.json"),
 )
 FILAMENT_PARAMS_PATHS = tuple(
-    os.environ.get(
-        "MULTIACE_FILAMENT_PARAMS",
-        "/home/lava/klipper/klippy/extras/filament_parameters.py:"
-        "/home/printer_data/klipper/klippy/extras/filament_parameters.py:"
-        "/usr/share/klipper/klippy/extras/filament_parameters.py",
-    ).split(":")
+    os.environ.get("MULTIACE_FILAMENT_PARAMS", "").split(":") if os.environ.get("MULTIACE_FILAMENT_PARAMS") 
+    else _resolve_klipper_extras("filament_parameters.py")
 )
 _FIL_DB_META_KEYS = {
     "version", "hard_filaments_max_flow_k", "soft_filaments_max_flow_k",
@@ -185,9 +209,7 @@ def _resolve_version() -> str:
     v = os.environ.get("MULTIACE_WEB_VERSION", "")
     if v:
         return v
-    for path in ("/home/lava/klipper/klippy/extras/ace.py",
-                 "/home/printer_data/klipper/klippy/extras/ace.py",
-                 "/usr/share/klipper/klippy/extras/ace.py"):
+    for path in _resolve_klipper_extras("ace.py"):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 head = f.read(4096)
@@ -890,10 +912,7 @@ def _load_post_processor():
     2026-07-05: a print ran without the ANTI_OOZE stamps). Reload whenever
     the source file changed (path/mtime/size signature)."""
     global _pp_module, _pp_src_sig
-    candidates = [
-        Path("/home/lava/printer_data/config/tools/post_process_virtual_toolheads.py"),
-        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
-    ]
+    candidates = [Path(p) for p in _resolve_tool_script("post_process_virtual_toolheads.py")]
     src = next((p for p in candidates if p.is_file()), None)
     if src is None:
         raise HTTPException(status_code=503,
@@ -1375,10 +1394,7 @@ async def preflight_pysrc() -> dict:
     """The two Python sources the in-browser Pyodide worker runs: the
     unmodified post-processor + preflight_core. Served so the browser executes
     the SAME code as the backend (one source of truth, no JS re-port/drift)."""
-    candidates = [
-        Path("/home/lava/printer_data/config/tools/post_process_virtual_toolheads.py"),
-        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
-    ]
+    candidates = [Path(p) for p in _resolve_tool_script("post_process_virtual_toolheads.py")]
     pp_src = next((p for p in candidates if p.is_file()), None)
     if pp_src is None:
         raise HTTPException(status_code=503,
@@ -1476,20 +1492,11 @@ def _read_update_cfg() -> dict[str, str]:
 async def _run_update_script(args: list[str], timeout: float) -> dict:
     """Exec the bundled multiace_update.sh and capture stdout+rc."""
 
-    update_script = None
-    for candidate in (
-        "/home/lava/multiace_update.sh",
-        "/home/lava/multiace/tools/multiace_update.sh",
-    ):
-        if Path(candidate).is_file():
-            update_script = candidate
-            break
+    update_script = _resolve_update_script()
     if update_script is None:
         raise HTTPException(
             status_code=503,
-            detail=("Updater script not found at "
-                    "/home/lava/multiace/tools/multiace_update.sh "
-                    "or /home/lava/multiace_update.sh. "
+            detail=("Updater script not found. "
                     "Re-run install_multiace.sh from the repo to ship it."))
     env = os.environ.copy()
     env.update(_read_update_cfg())
@@ -3006,11 +3013,7 @@ def _load_tipform_module():
     the post-processor loader (S23: updates replace the file, uvicorn
     lives on). None = module not on this build -> editor disabled."""
     import importlib.util
-    candidates = [
-        Path("/home/lava/klipper/klippy/extras/ace_tipform.py"),
-        Path(__file__).resolve().parents[2] / "klipper" / "extras"
-        / "ace_tipform.py",
-    ]
+    candidates = [Path(p) for p in _resolve_klipper_extras("ace_tipform.py")]
     for cand in candidates:
         try:
             if not cand.is_file():
