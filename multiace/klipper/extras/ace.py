@@ -1163,6 +1163,9 @@ class MultiAce:
             'ACE_LANE_NORMALIZE', self.cmd_ACE_LANE_NORMALIZE,
             desc="Calibrate PTFE tube length and park lane at hub gate: T=<0..3> or ALL=1")
         self.gcode.register_command(
+            'ACE_CALIBRATE_LANES', self.cmd_ACE_LANE_NORMALIZE,
+            desc="Alias for ACE_LANE_NORMALIZE: ALL=1 or LANES=<0,1,2,3>")
+        self.gcode.register_command(
             'ACE_PTFE_HISTORY', self.cmd_ACE_PTFE_HISTORY,
             desc="Query rolling PTFE calibration history and P95: [SIZE=<2-50>]")
 
@@ -6459,7 +6462,19 @@ class MultiAce:
             self.reactor.register_callback(_async_save)
 
     def cmd_ACE_LANE_NORMALIZE(self, gcmd):
-        """Calibrate PTFE tube length and park lane at hub gate: T=<0..3> or ALL=1"""
+        """Calibrate PTFE tube length and park lane at hub gate: T=<0..3> or ALL=1 or LANES=<0,1,2,3>"""
+        lanes_param = gcmd.get('LANES', None)
+        if lanes_param is not None:
+            for tok in str(lanes_param).split(','):
+                tok = tok.strip()
+                if tok and tok.isdigit():
+                    t = int(tok)
+                    if 0 <= t < 4:
+                        slot_info = (self._info_per_ace.get(self._active_device_index, {}).get('slots') or [{}])[t] if t < len(self._info_per_ace.get(self._active_device_index, {}).get('slots', [])) else {}
+                        st = slot_info.get('status', '')
+                        if not self._is_empty_status(st):
+                            self._pre_load(t)
+            return
         all_lanes = gcmd.get_int('ALL', 0)
         if all_lanes:
             for t in range(4):
@@ -6468,7 +6483,11 @@ class MultiAce:
                 if not self._is_empty_status(st):
                     self._pre_load(t)
             return
-        tool = gcmd.get_int('T', gcmd.get_int('INDEX', None))
+        tool = None
+        if gcmd.get('T', None) is not None:
+            tool = gcmd.get_int('T')
+        elif gcmd.get('INDEX', None) is not None:
+            tool = gcmd.get_int('INDEX')
         if tool is None or tool < 0 or tool >= 4:
             raise gcmd.error("ACE_LANE_NORMALIZE: T=<0..3> required")
         self._pre_load(tool)
