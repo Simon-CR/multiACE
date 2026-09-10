@@ -1480,7 +1480,7 @@ createApp({
     // (see needsReload). Drying the other ACE mid-print is a wanted feature and
     // stays enabled (the FA-preserve in _perform_switch + the V2 watchdog keep
     // the printing head fed).
-    const isPrinting = computed(() => state.printer_state === 'printing');
+    const isPrinting = computed(() => state.printer_state === 'printing' || state.printer_state === 'busy');
     function _blockIfPrinting() {
       if (isPrinting.value) {
         setMacroLog(t("ui.dashboard.blocked_printing"));
