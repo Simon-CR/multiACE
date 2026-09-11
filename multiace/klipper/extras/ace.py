@@ -2024,16 +2024,6 @@ class MultiAce:
         if self.ace_device_count is not None:
             expected = self.ace_device_count
             if len(self._ace_devices) < expected:
-                self.log_always(self._t('msg.waiting_for_devices',
-                    expected=expected, count=len(self._ace_devices)))
-                deadline = time.monotonic() + 20.0
-                attempt = 0
-                while time.monotonic() < deadline and len(self._ace_devices) < expected:
-                    time.sleep(1.0)
-                    attempt += 1
-                    self._refresh_ace_devices('startup_wait_%d' % attempt)
-            if len(self._ace_devices) < expected:
-
                 self._ace_startup_failed = True
                 self.log_error(self._t('msg.usb_unstable',
                     expected=expected, count=len(self._ace_devices)))
@@ -6475,7 +6465,7 @@ class MultiAce:
                         if not self._is_empty_status(st):
                             self._pre_load(t)
             return
-        all_lanes = gcmd.get_int('ALL', 0)
+        all_lanes = gcmd.get_int('ALL', 1 if 'CALIBRATE_LANES' in gcmd.get_command() else 0)
         if all_lanes:
             for t in range(4):
                 slot_info = (self._info_per_ace.get(self._active_device_index, {}).get('slots') or [{}])[t] if t < len(self._info_per_ace.get(self._active_device_index, {}).get('slots', [])) else {}
