@@ -153,10 +153,11 @@ INSERT_GRAB_MM = 20
 INSERT_GRAB_WAIT_S = 8.0
 WAIT_ACE_FEEDING_MAX = 4
 
-CRUSH_GUARD_MIN_FEED_MM = 20.0
+CRUSH_GUARD_MIN_FEED_MM = 30.0
+CRUSH_GUARD_STANDSTILL_MM = 2.0
 CRUSH_GUARD_SLIP_RATIO = 0.20
-CRUSH_GUARD_POLL_INTERVAL = 0.20
-DEC_MM_PER_COUNT = 1.2342
+CRUSH_GUARD_POLL_INTERVAL = 0.25
+DEC_MM_PER_COUNT = 1.0  # V2 firmware returns signed mm directly in Field 3 (Simon-CR / Dirk 2026-09-11)
 
 FA_HOMING_SETTLE = 0.5
 
@@ -2680,9 +2681,10 @@ class MultiAce:
 
     def _check_feed_slip(self, idx, slot, cmd_mm, dec_mm,
                          min_threshold=CRUSH_GUARD_MIN_FEED_MM,
+                         standstill_threshold=CRUSH_GUARD_STANDSTILL_MM,
                          slip_ratio_threshold=CRUSH_GUARD_SLIP_RATIO):
         """Evaluate slip between commanded feed mm and optical decoder mm.
-        Returns True if slip/crush condition detected on V2 hardware."""
+        Returns True if slip/crush/standstill condition detected on V2 hardware."""
         try:
             if not self._is_v2_idx(idx):
                 return False
@@ -2692,7 +2694,8 @@ class MultiAce:
             return False
         if cmd_mm < min_threshold:
             return False
-        return dec_mm < (slip_ratio_threshold * cmd_mm)
+        return dec_mm < standstill_threshold or dec_mm < (slip_ratio_threshold * cmd_mm)
+
 
     def _retract_with_decoder_span(self, idx, slot, retract_fn):
         """[diag] Run retract_fn() while sampling the V2 decoder every ~100ms
@@ -7031,7 +7034,7 @@ class MultiAce:
                     raw_span = max(span, delta)
                     dec_mm = float(raw_span) * DEC_MM_PER_COUNT
 
-                    if cmd_mm >= min_threshold and dec_mm < (slip_ratio_threshold * cmd_mm):
+                    if cmd_mm >= min_threshold and (dec_mm < CRUSH_GUARD_STANDSTILL_MM or dec_mm < (slip_ratio_threshold * cmd_mm)):
                         box['slip_detected'] = True
                         box['cmd_mm'] = cmd_mm
                         box['dec_mm'] = dec_mm
@@ -7068,12 +7071,13 @@ class MultiAce:
             dec_mm = float(raw_span) * DEC_MM_PER_COUNT
 
         if not stopped_early and box['samples'] >= 2 and cmd_mm >= min_threshold:
-            if dec_mm < (slip_ratio_threshold * cmd_mm):
+            if dec_mm < CRUSH_GUARD_STANDSTILL_MM or dec_mm < (slip_ratio_threshold * cmd_mm):
                 box['slip_detected'] = True
                 self._stop_feeding(slot, idx=idx)
                 msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
                        'commanded %gmm, moved %gmm'
                        % (idx, slot, round(cmd_mm, 1), round(dec_mm, 1)))
+
                 self.log_warn('[multiACE] %s' % msg)
                 logging.warning('[multiACE] %s' % msg)
                 if raise_on_slip:
@@ -7872,8 +7876,9 @@ class MultiAce:
                     dmax = move.get('decoder_max')
                     if dmin is not None and dmax is not None and cmd_mm >= CRUSH_GUARD_MIN_FEED_MM:
                         dec_mm = float(max(0, dmax - dmin)) * DEC_MM_PER_COUNT
-                        if dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
+                        if dec_mm < CRUSH_GUARD_STANDSTILL_MM or dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
                             self._calibration_send_stop()
+
                             msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
                                    'commanded %gmm, moved %gmm'
                                    % (idx, c['slot'], round(cmd_mm, 1), round(dec_mm, 1)))
@@ -8007,8 +8012,9 @@ class MultiAce:
                     dmax = move.get('decoder_max')
                     if dmin is not None and dmax is not None and cmd_mm >= CRUSH_GUARD_MIN_FEED_MM:
                         dec_mm = float(max(0, dmax - dmin)) * DEC_MM_PER_COUNT
-                        if dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
+                        if dec_mm < CRUSH_GUARD_STANDSTILL_MM or dec_mm < (CRUSH_GUARD_SLIP_RATIO * cmd_mm):
                             self._calibration_send_stop()
+
                             msg = ('Filament slip / crush condition detected on ACE %d slot %d: '
                                    'commanded %gmm, moved %gmm'
                                    % (idx, slot, round(cmd_mm, 1), round(dec_mm, 1)))
