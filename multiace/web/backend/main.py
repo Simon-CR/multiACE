@@ -77,10 +77,18 @@ def _first_existing(candidates: list[str]) -> str:
 _CFG_DIR = _first_existing(_user_paths("printer_data/config"))
 _CFG_EXT_DIR = os.path.join(_CFG_DIR, "extended")
 
-MULTIACE_CFG_PATH = os.environ.get(
-    "MULTIACE_CFG_PATH",
-    os.path.join(_CFG_EXT_DIR, "ace.cfg"),
-)
+def _resolve_cfg_path() -> str:
+    env_path = os.environ.get("MULTIACE_CFG_PATH")
+    if env_path:
+        return env_path
+    
+    candidates = [
+        os.path.join(_CFG_EXT_DIR, "ace.cfg"),
+        os.path.join(_CFG_DIR, "ace.cfg"),
+    ]
+    return _first_existing(candidates)
+
+MULTIACE_CFG_PATH = _resolve_cfg_path()
 SNAPSHOT_DIR = os.environ.get(
     "MULTIACE_SNAPSHOT_DIR",
     os.path.join(_CFG_EXT_DIR, "multiace", "filament_snapshots"),
