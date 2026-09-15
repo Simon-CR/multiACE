@@ -722,6 +722,7 @@ class MultiAce:
                 '[multiACE] print_mode=%s ignored (obsolete in v0.82+)'
                 % cfg_print_mode)
 
+        self.startup_wait = config.getfloat('startup_wait', 20.0, minval=0.0)
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
         self.retract_length = config.getint('retract_length', 100)
@@ -3032,12 +3033,13 @@ class MultiAce:
             if len(self._ace_devices) < expected:
                 self.log_always(self._t('msg.waiting_for_devices',
                     expected=expected, count=len(self._ace_devices)))
-                deadline = time.monotonic() + 20.0
-                attempt = 0
-                while time.monotonic() < deadline and len(self._ace_devices) < expected:
-                    self.reactor.pause(self.reactor.monotonic() + 1.0)
-                    attempt += 1
-                    self._refresh_ace_devices('startup_wait_%d' % attempt)
+                if self.startup_wait > 0.0:
+                    deadline = time.monotonic() + self.startup_wait
+                    attempt = 0
+                    while time.monotonic() < deadline and len(self._ace_devices) < expected:
+                        self.reactor.pause(self.reactor.monotonic() + 1.0)
+                        attempt += 1
+                        self._refresh_ace_devices('startup_wait_%d' % attempt)
             if len(self._ace_devices) < expected:
 
                 self._ace_startup_failed = True
