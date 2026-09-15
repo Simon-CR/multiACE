@@ -9085,6 +9085,16 @@ class MultiAce:
         if dmin is None or dmax is None:
             return
         span = max(0, int(dmax) - int(dmin))
+        
+        # Command 76 standstill guard
+        commanded = float(move.get('length', 0.0))
+        if commanded >= 30.0 and span < 2.0:
+            self._calibration_fail(
+                "Standstill guard tripped (Command 76): "
+                f"commanded {commanded}mm but decoder moved only {span}mm"
+            )
+            return
+
         kind = str(move.get('kind') or '')
         if kind.startswith('verify_'):
             current = self._calibration.get('verify_decoder_span')
