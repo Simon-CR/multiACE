@@ -645,7 +645,7 @@ class MultiAce:
     # session 2026-08-14). Mirrors the web backend's MULTIACE_CFG_PATH
     # default; a setup with [ace] elsewhere gets a loud refusal instead
     # of a silent second storage location.
-    ACE_CFG_PATH = '/home/lava/printer_data/config/extended/ace.cfg'
+    ACE_CFG_PATH = os.path.expanduser('~/printer_data/config/extended/ace.cfg')
 
     VARS_ACE_REVISION = 'ace__revision'
     VARS_ACE_ACTIVE_DEVICE = 'ace__active_device'
@@ -1247,7 +1247,7 @@ class MultiAce:
 
         self._slot_overrides = {}
         self._slot_overrides_file = (
-            "/home/lava/printer_data/config/extended/multiace/slot_overrides.json")
+            os.path.expanduser('~/printer_data/config/extended/multiace/slot_overrides.json'))
         self._slot_overrides_mtime = 0.0
 
         self._orig_set_ptc = None
@@ -1318,7 +1318,7 @@ class MultiAce:
         self._web_port = config.getint(
             'web_port', 7126, minval=1024, maxval=65535)
         self._web_dir = config.get(
-            'web_dir', '/home/lava/multiace_web')
+            'web_dir', os.path.expanduser('~/multiace_web'))
 
         # Language: prefer the persisted ace__language (same store the web
         # language switcher writes via MULTIACE_SET_LANGUAGE), fall back to the
@@ -1374,7 +1374,7 @@ class MultiAce:
         self._inbox_max_mb = config.getint(
             'inbox_max_mb', 256, minval=1, maxval=4096)
 
-        self._i18n_primary = '/home/lava/printer_data/config/extended/multiace/i18n'
+        self._i18n_primary = os.path.expanduser('~/printer_data/config/extended/multiace/i18n')
         self._i18n_fallback = os.path.join(self._web_dir, 'i18n')
         self._reload_i18n_catalog()
 
@@ -1566,7 +1566,7 @@ class MultiAce:
         # arm, wholesale in _on_print_start.
         self._fa_failed_notified = {}
 
-        log_dir = config.get('log_dir', '/home/lava/printer_data/logs')
+        log_dir = config.get('log_dir', '/home/simon/printer_data/logs')
         self._usb_log = _setup_file_logger(
             'multiace_usb', os.path.join(log_dir, 'multiace_usb.log'))
         self._state_log = _setup_file_logger(
@@ -1586,8 +1586,7 @@ class MultiAce:
         # is the SINGLE writer - the web edits through gcode commands, never
         # by writing this file (the config lost-update lesson, 2026-07-30).
         self.spool_db_path = config.get(
-            'spool_db', '/home/lava/printer_data/config/persistent/'
-                        'multiace_spools.json')
+            'spool_db', os.path.expanduser('~/printer_data/config/persistent/multiace_spools.json'))
         self._spools = {}          # id(str) -> spool dict
         self._spool_binding = {}   # 'ace_slot' -> id
         self._spool_next_id = 1
@@ -5039,8 +5038,11 @@ class MultiAce:
             idx = self._active_device_index
         protocol = self._protocols.get(idx)
         if protocol is None:
-            return AceProtocolV1().make_default_info()
-        return protocol.make_default_info()
+            ret = AceProtocolV1().make_default_info()
+        else:
+            ret = protocol.make_default_info()
+        ret['last_status_ts'] = time.monotonic()
+        return ret
 
     def _next_request_id_for(self, idx):
 
@@ -5282,7 +5284,10 @@ class MultiAce:
                     logging.info('[multiACE] open ACE %d timed out '
                                  '(serial still opening off-thread)' % idx)
                     return False
-                self.reactor.pause(self.reactor.monotonic() + 0.05)
+                try:
+                    self.reactor.pause(self.reactor.monotonic() + 0.05)
+                except Exception:
+                    time.sleep(0.05)
             if _open_res['err'] is not None:
                 raise _open_res['err']
             ser = _open_res['ser']
@@ -5294,7 +5299,7 @@ class MultiAce:
             self._request_ids[idx] = 0
             self._callback_maps[idx] = {}
             self._read_buffers[idx] = bytearray()
-            self._info_per_ace[idx] = protocol.make_default_info()
+            self._info_per_ace[idx] = self._make_default_info(idx)
             # Arm the once-per-connection tag rescan (V2): a spool swapped
             # while multiACE/the ACE was off produced no insert event, so
             # the device holds no read for it and the persisted spool
@@ -5640,6 +5645,11 @@ class MultiAce:
             return
         for ret in protocol.decode_frames(buf):
             msg_id = ret.get('id')
+            
+            # Watchdog: update timestamp on any valid parsed frame
+            info = self._info_per_ace.setdefault(idx, self._make_default_info(idx))
+            info['last_status_ts'] = time.monotonic()
+            
             cb_map = self._callback_maps.get(idx, {})
             if msg_id in cb_map:
                 callback = cb_map.pop(msg_id)
@@ -8303,6 +8313,24 @@ class MultiAce:
         reconnect_count = 0
         feeding_waits = 0
         while info.get('status') != 'ready':
+            silence = time.monotonic() - info.get('last_status_ts', time.monotonic())
+            if silence >= 8.0:
+                self.log_warn('[multiACE] ACE %d transport silence >= 8.0s (mute detected), triggering reconnect recovery' % idx)
+                try:
+                    self._disconnect_from(idx)
+                except Exception:
+                    pass
+                deadline = 0
+            elif silence > 5.0:
+                self.log_always('[multiACE] ACE %d transport silence > 5.0s, issuing high-priority status probe' % idx)
+                try:
+                    ser = self._serials.get(idx)
+                    if ser is not None and getattr(ser, 'reset_input_buffer', None):
+                        ser.reset_input_buffer()
+                    self.send_request_to(idx, {"method": "get_status"}, lambda s, r: None)
+                except Exception:
+                    pass
+
             if time.monotonic() > deadline:
 
                 # A V2 that reports 'busy' because a slot is genuinely feeding/
@@ -10169,7 +10197,7 @@ class MultiAce:
         'PVA',
     )
     _FILAMENT_DB_PATHS = (
-        '/home/lava/klipper/klippy/extras/filament_parameters.py',
+        os.path.expanduser('~/klipper/klippy/extras/filament_parameters.py'),
         '/home/printer_data/klipper/klippy/extras/filament_parameters.py',
         '/usr/share/klipper/klippy/extras/filament_parameters.py',
     )
@@ -19690,7 +19718,7 @@ class MultiAce:
         raise gcmd.error(
             '[multiACE] Switched to %s mode. Please reboot the printer to activate!' % mode.upper())
 
-    _UPDATE_SCRIPT = '/home/lava/multiace_update.sh'
+    _UPDATE_SCRIPT = os.path.expanduser('~/multiace_update.sh')
 
     def _run_update_script(self, gcmd, sub_args, timeout):
         if not os.path.isfile(self._UPDATE_SCRIPT):

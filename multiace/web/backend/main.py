@@ -77,10 +77,18 @@ def _first_existing(candidates: list[str]) -> str:
 _CFG_DIR = _first_existing(_user_paths("printer_data/config"))
 _CFG_EXT_DIR = os.path.join(_CFG_DIR, "extended")
 
-MULTIACE_CFG_PATH = os.environ.get(
-    "MULTIACE_CFG_PATH",
-    os.path.join(_CFG_EXT_DIR, "ace.cfg"),
-)
+def _resolve_cfg_path() -> str:
+    env_path = os.environ.get("MULTIACE_CFG_PATH")
+    if env_path:
+        return env_path
+    
+    candidates = [
+        os.path.join(_CFG_EXT_DIR, "ace.cfg"),
+        os.path.join(_CFG_DIR, "ace.cfg"),
+    ]
+    return _first_existing(candidates)
+
+MULTIACE_CFG_PATH = _resolve_cfg_path()
 SNAPSHOT_DIR = os.environ.get(
     "MULTIACE_SNAPSHOT_DIR",
     os.path.join(_CFG_EXT_DIR, "multiace", "filament_snapshots"),
@@ -934,7 +942,7 @@ async def version() -> dict:
     return {
         "web": VERSION,
         "moonraker_url": MOONRAKER_URL,
-        "config_path": MULTIACE_CFG_PATH,
+        "config_path": _resolve_cfg_path(),
         "frontend_dir": FRONTEND_DIR,
         "printer": printer,
     }
@@ -1601,13 +1609,13 @@ _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
 
 def _read_cfg_scalars() -> dict:
     try:
-        st = Path(MULTIACE_CFG_PATH).stat()
+        st = Path(_resolve_cfg_path()).stat()
     except OSError:
         return _cfg_scalar_cache["values"]
     if st.st_mtime == _cfg_scalar_cache["mtime"]:
         return _cfg_scalar_cache["values"]
     try:
-        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        text = Path(_resolve_cfg_path()).read_text(encoding="utf-8")
         main, _per_ace = _extract_params(text)
     except Exception:
         return _cfg_scalar_cache["values"]
@@ -1639,7 +1647,7 @@ def _read_update_cfg() -> dict[str, str]:
     prerelease = "0"
     url_base = ""
     try:
-        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        text = Path(_resolve_cfg_path()).read_text(encoding="utf-8")
         main, _per_ace = _extract_params(text)
         if "update_repo" in main and main["update_repo"]:
             repo = main["update_repo"]
@@ -3527,7 +3535,7 @@ async def get_tipform() -> dict:
     """The tip-forming editor state: cfg truth (mode + raw table strings)
     plus whether this build supports the feature at all."""
     mod = _load_tipform_module()
-    p = Path(MULTIACE_CFG_PATH)
+    p = Path(_resolve_cfg_path())
     mode, tables = ("stock", {})
     if p.exists():
         mode, tables = _extract_tipform(p.read_text(encoding="utf-8"))
@@ -3564,9 +3572,9 @@ async def set_tipform(payload: TipformUpdate) -> dict:
         except ValueError as e:
             raise HTTPException(400, "table %r: %s" % (key, e))
         tables[key] = raw
-    p = Path(MULTIACE_CFG_PATH)
+    p = Path(_resolve_cfg_path())
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {_resolve_cfg_path()}")
     text = p.read_text(encoding="utf-8")
     backup = p.with_suffix(p.suffix + ".bak")
     _write_cfg_atomic(backup, text)
@@ -3628,9 +3636,9 @@ def _write_cfg_atomic(path, text: str) -> None:
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    p = Path(MULTIACE_CFG_PATH)
+    p = Path(_resolve_cfg_path())
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {_resolve_cfg_path()}")
     text = p.read_text(encoding="utf-8")
     main, per_ace = _extract_params(text)
     return {"path": str(p), "content": text, "params": main,
@@ -3638,9 +3646,9 @@ async def get_config() -> dict:
 
 @app.put("/api/config")
 async def update_config(payload: ConfigUpdate) -> dict:
-    p = Path(MULTIACE_CFG_PATH)
+    p = Path(_resolve_cfg_path())
     if not p.exists():
-        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+        raise HTTPException(404, f"config file not found: {_resolve_cfg_path()}")
     if payload.base_sha1:
         # Lost-update guard (see ConfigUpdate.base_sha1): the file changed
         # since the browser loaded it, so the payload is built on a stale
