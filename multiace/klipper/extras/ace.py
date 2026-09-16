@@ -1566,7 +1566,7 @@ class MultiAce:
         # arm, wholesale in _on_print_start.
         self._fa_failed_notified = {}
 
-        log_dir = config.get('log_dir', '/home/simon/printer_data/logs')
+        log_dir = config.get('log_dir', os.path.expanduser('~/printer_data/logs'))
         self._usb_log = _setup_file_logger(
             'multiace_usb', os.path.join(log_dir, 'multiace_usb.log'))
         self._state_log = _setup_file_logger(
