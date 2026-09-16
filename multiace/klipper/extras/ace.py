@@ -7117,7 +7117,7 @@ class MultiAce:
                     # persisted/surfaced as one - it binds (below) and
                     # lives until the next heartbeat like a cmd13 read.
                     self._v2_store_filament_read(_idx, _slot, res,
-                                                 host=False)
+                                                 host=True)
                 self.send_request_to(idx, {
                     'method': 'filament_identify',
                     'params': {'index': i},
