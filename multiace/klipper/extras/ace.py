@@ -8958,8 +8958,19 @@ class MultiAce:
         }
 
     def _calibration_sensor(self, head):
-        sensor = self.printer.lookup_object(
-            'filament_motion_sensor e%d_filament' % int(head), None)
+        candidates = [
+            'filament_motion_sensor e%d_filament' % int(head),
+            'filament_switch_sensor toolhead_entry',
+            'filament_switch_sensor toolhead_sensor',
+            'filament_motion_sensor encoder_sensor',
+            'filament_switch_sensor toolhead_postgear',
+            'filament_switch_sensor e%d_entry' % int(head),
+        ]
+        sensor = None
+        for name in candidates:
+            sensor = self.printer.lookup_object(name, None)
+            if sensor is not None:
+                break
         if sensor is None:
             return None
         try:
