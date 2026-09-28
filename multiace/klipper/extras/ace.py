@@ -4977,6 +4977,16 @@ class MultiAce:
     def rgb2hex(self, r, g, b):
         return "%02X%02X%02X" % (r, g, b)
 
+    @staticmethod
+    def _hex_to_rgb(hex_str):
+        s = str(hex_str or '').strip().lstrip('#')
+        if len(s) >= 6:
+            try:
+                return [int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)]
+            except (ValueError, TypeError):
+                pass
+        return [0, 0, 0]
+
     def delete_variable(self, variable, write=False):
         _ = self.save_variables.allVariables.pop(variable, None)
         if write:
@@ -20593,21 +20603,58 @@ class MultiAce:
         # attached ACE is shown; the per-head feeder/manual flags below tell the
         # UI which heads are not ACE-driven.
         aces = []
+        gm = None
+        if self.save_variables is not None:
+            try:
+                gm = self.save_variables.allVariables.get('ace_gate_map')
+                if isinstance(gm, str):
+                    gm = json.loads(gm)
+            except Exception:
+                gm = None
         for i in range(len(self._ace_devices)):
             info = self._info_per_ace.get(i, {}) or {}
+            gate_list = self._gate_status_per_ace.get(i, [])
             slots_out = []
             for n, s in enumerate(info.get('slots', []) or []):
                 if not isinstance(s, dict):
                     continue
+                st = s.get('status', '')
+                sku = s.get('sku', '')
+                mat = s.get('type', '')
+                brand = s.get('brand', '')
+                color = list(s.get('color', [0, 0, 0]) or [0, 0, 0])
+
+                gate_occ = (n < len(gate_list) and gate_list[n] == GATE_AVAILABLE)
+                if gate_occ:
+                    if st in ('unknown', ''):
+                        st = 'ready'
+                    if isinstance(gm, dict):
+                        g_idx = i * 4 + n
+                        g_ent = gm.get(str(g_idx)) or gm.get(g_idx)
+                        if isinstance(g_ent, dict):
+                            g_mat = (g_ent.get('material') or '').strip()
+                            g_col = (g_ent.get('color') or '').strip()
+                            g_name = (g_ent.get('name') or '').strip()
+                            g_spool = g_ent.get('spool_id', -1)
+                            if not mat and g_mat: mat = g_mat
+                            if (color == [0, 0, 0] or not color) and g_col:
+                                color = self._hex_to_rgb(g_col)
+                            if not brand and g_name: brand = g_name
+                            if not sku and g_spool:
+                                try:
+                                    sid = int(g_spool)
+                                    if sid > 0: sku = 'SM%d' % sid
+                                except (ValueError, TypeError): pass
+
                 slots_out.append({
                     'index':    s.get('index', n),
-                    'status':   s.get('status', ''),
-                    'sku':      s.get('sku', ''),
-                    'material': s.get('type', ''),
+                    'status':   st,
+                    'sku':      sku,
+                    'material': mat,
                     'subtype':  s.get('subtype', ''),
                     'rfid':     s.get('rfid', 0),
-                    'brand':    s.get('brand', ''),
-                    'color':    s.get('color', [0, 0, 0]),
+                    'brand':    brand,
+                    'color':    color,
                     # Card UID of the last host read (UID-first line);
                     # the merge sets it, this list is explicit so it
                     # never reached the web.
