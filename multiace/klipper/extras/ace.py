@@ -667,6 +667,9 @@ class MultiAce:
         self.retract_length = config.getint('retract_length', 100)
 
         self.feed_length = config.getint('feed_length', 0)
+        self.calibration_sensor = config.get('calibration_sensor', None)
+        if self.calibration_sensor:
+            self.calibration_sensor = self.calibration_sensor.strip()
 
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
@@ -8958,19 +8961,28 @@ class MultiAce:
         }
 
     def _calibration_sensor(self, head):
-        candidates = [
-            'filament_motion_sensor e%d_filament' % int(head),
-            'filament_switch_sensor toolhead_entry',
-            'filament_switch_sensor toolhead_sensor',
-            'filament_motion_sensor encoder_sensor',
-            'filament_switch_sensor toolhead_postgear',
-            'filament_switch_sensor e%d_entry' % int(head),
-        ]
         sensor = None
-        for name in candidates:
+        if getattr(self, 'calibration_sensor', None):
+            name = self.calibration_sensor
+            if '%d' in name:
+                try:
+                    name = name % int(head)
+                except Exception:
+                    pass
             sensor = self.printer.lookup_object(name, None)
-            if sensor is not None:
-                break
+        if sensor is None:
+            candidates = [
+                'filament_motion_sensor e%d_filament' % int(head),
+                'filament_switch_sensor toolhead_entry',
+                'filament_switch_sensor toolhead_sensor',
+                'filament_motion_sensor encoder_sensor',
+                'filament_switch_sensor toolhead_postgear',
+                'filament_switch_sensor e%d_entry' % int(head),
+            ]
+            for name in candidates:
+                sensor = self.printer.lookup_object(name, None)
+                if sensor is not None:
+                    break
         if sensor is None:
             return None
         try:
