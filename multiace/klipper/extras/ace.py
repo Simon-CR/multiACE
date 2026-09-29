@@ -11899,27 +11899,32 @@ class MultiAce:
                       ' (TTL %s clamped to %ds)' % (clamped, int(ttl)))))
 
     cmd_ACE_FW_RELEASE_help = (
-        '[multiACE] Release one ACE 2 serial port for a firmware flash: '
-        'ACE_FW_RELEASE ACE=n. Disconnects the unit and holds every '
-        'reconnect path until ACE_FW_RESUME.')
+        '[multiACE] Release one ACE serial port for a firmware flash: '
+        'ACE_FW_RELEASE ACE=n. Works for both generations (Gen 1 ACE Pro: '
+        'IAP flasher, Gen 2 ACE 2: OTA updater). Disconnects the unit and '
+        'holds every reconnect path until ACE_FW_RESUME.')
 
     def cmd_ACE_FW_RELEASE(self, gcmd):
-        """The Klipper half of the ACE 2 OTA update (web backend does the
-        flashing): tear down OUR side of the port so the flasher can open
-        it, and HOLD it - _open_ace refuses a held idx, which gates every
-        reconnect path through the one choke point (scans, error recovery,
-        late-join). NOT persisted on purpose: a Klipper restart mid-flash
-        reconnects the unit and the flash fails loudly - the inverse (a
-        stale persisted hold stranding an ACE forever) would be a silent
-        failure. So: no Klipper restarts while flashing."""
+        """The Klipper half of an ACE firmware update (the web backend or a
+        bench flasher does the flashing): tear down OUR side of the port so
+        the flasher can open it, and HOLD it - _open_ace refuses a held idx,
+        which gates every reconnect path through the one choke point
+        (scans, error recovery, late-join). Both generations use this one
+        command: the web picks the Gen 1 IAP or the Gen 2 OTA transport
+        from the protocol Klipper reports. NOT persisted on purpose: a
+        Klipper restart mid-flash reconnects the unit and the flash fails
+        loudly - the inverse (a stale persisted hold stranding an ACE
+        forever) would be a silent failure. So: no Klipper restarts while
+        flashing."""
         idx = gcmd.get_int('ACE', minval=0, maxval=3)
         if idx >= len(self._ace_devices):
             raise self._ace_error(gcmd, 'No ACE %d' % self._disp(idx),
                                   code=208)
-        if not self._is_v2(idx):
+        if not (self._is_v2(idx) or self._is_v1(idx)):
             raise self._ace_error(
-                gcmd, 'ACE %d is a V1 (ACE Pro) - the OTA updater is for '
-                      'the ACE 2 only' % self._disp(idx), code=200)
+                gcmd, 'ACE %d has no detected protocol yet - connect it '
+                      'once so the flasher is known before releasing the '
+                      'port' % self._disp(idx), code=200)
         if self._is_actively_printing():
             raise self._ace_error(
                 gcmd, 'Refusing to release ACE %d while a print is running'
@@ -13804,6 +13809,10 @@ class MultiAce:
     def _is_v2(self, idx):
         p = self._protocols.get(idx)
         return bool(p is not None and getattr(p, 'NAME', '') == 'v2')
+
+    def _is_v1(self, idx):
+        p = self._protocols.get(idx)
+        return bool(p is not None and getattr(p, 'NAME', '') == 'v1')
 
     def _ace_internal_humidity(self, idx):
         """The unit's OWN sensor reading (ACE 2 only - a Pro has none)."""

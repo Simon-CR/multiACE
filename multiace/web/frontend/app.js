@@ -2168,11 +2168,13 @@ createApp({
     async function setSpoolmanAuto(enable) {
       await spoolMacro("ACE_SET_SPOOLMAN", {AUTO: enable ? 1 : 0});
     }
-    // --- ACE 2 firmware update (Config tab; flash engine based on
-    // hakimio's OTA updater). The heavy
-    // lifting is Klipper (port release/hold) + backend (flash thread);
-    // this is upload, two buttons and a poll. The flash button goes
-    // through the BIG RED own-risk dialog. ---
+    // --- ACE firmware update (Config tab). Two engines behind one card:
+    // the ACE 2 goes through the OTA updater (backend/ace2_ota.py, based
+    // on hakimio's), the Gen 1 ACE Pro through the IAP flasher
+    // (backend/ace1_flash.py). The heavy lifting is Klipper (port
+    // release/hold, both generations) + backend (flash thread); this is
+    // upload, two buttons and a poll. The flash button goes through the
+    // BIG RED own-risk dialog. ---
     const acefw = reactive({ace: "", version: "", password: "",
                             fileName: "", fileSize: 0, busy: false,
                             status: null, uiError: "", force: false,
@@ -2198,11 +2200,17 @@ createApp({
     // the dry run stays open (it is the release tool that produces the
     // CRC/MD5 for a NEW entry).
     const acefwVersions = ref([]);
+    // Gen 1 (ACE Pro) tested images - a separate allowlist, because a
+    // Gen-1 version string does not identify an image (stock and the
+    // OpenCubic CFW both report 1.3.863). The entries are keyed by image
+    // and the backend gates the upload byte-exactly on its md5.
+    const acefwGen1Versions = ref([]);
     async function acefwLoadVersions() {
       try {
         const r = await fetch(`${API}/acefw/versions`);
         const b = await r.json().catch(() => ({}));
         acefwVersions.value = b.versions || [];
+        acefwGen1Versions.value = b.gen1_versions || [];
         acefwPatchTarget.value = b.patch_target || "";
         acefwPatchTargets.value = b.patch_targets || [];
         // Preselect the backend's default, but never overwrite a choice the
@@ -2211,14 +2219,39 @@ createApp({
       } catch (e) { /* leave empty */ }
     }
     const acefwInput = ref(null);
+    // Both generations are flashable from this card: Gen 2 through the
+    // OTA engine, Gen 1 (ACE Pro) through the IAP flasher. The protocol
+    // decides which half of the card is shown and which backend engine
+    // runs - never a user flag.
     const acefwCandidates = computed(() =>
       (state.aces || [])
-        .filter(a => (a.protocol || "").toLowerCase() === "v2")
-        .map(a => ({value: a.idx,
-                    label: "ACE " + dispIdx(a.idx)
-                           + (a.firmware && a.firmware !== "Unknown"
-                              ? " · " + a.firmware : "")
-                           + (a.connected ? "" : " " + t("ui.acefw.offline"))})));
+        .filter(a => ["v1", "v2"].includes((a.protocol || "").toLowerCase()))
+        .map(a => {
+          const v1 = (a.protocol || "").toLowerCase() === "v1";
+          return {value: a.idx, v1: v1,
+                  label: "ACE " + dispIdx(a.idx)
+                         + " · " + t(v1 ? "ui.config.acefw_gen1"
+                                        : "ui.config.acefw_gen2")
+                         + (a.firmware && a.firmware !== "Unknown"
+                            ? " · " + a.firmware : "")
+                         + (a.connected ? "" : " " + t("ui.acefw.offline"))};
+        }));
+    const acefwIsV1 = computed(() => {
+      const c = acefwCandidates.value.find(o => o.value === acefw.ace);
+      return !!(c && c.v1);
+    });
+    // The version dropdown is an allowlist switchboard: Gen-2 entries are
+    // version keys, Gen-1 entries are image ids (the same 1.3.863 can be
+    // two different images). Options carry an `id` in both lists.
+    const acefwVersionOptions = computed(() =>
+      acefwIsV1.value ? acefwGen1Versions.value : acefwVersions.value);
+    // Switching the selected ACE switches allowlists - drop a pick the new
+    // list does not know (a Gen-2 version is not a Gen-1 image id).
+    watch(() => acefw.ace, () => {
+      if (!acefwVersionOptions.value.some(
+            v => (v.id || v.version) === acefw.version))
+        acefw.version = "";
+    });
     function acefwPickFile() { acefwInput.value && acefwInput.value.click(); }
     async function acefwUpload(files) {
       const f = files && files[0];
@@ -2233,11 +2266,15 @@ createApp({
         acefw.fileSize = body.size;
         acefw.uiError = "";
         // Pre-select the version from the file name - but only when it is
-        // a TESTED one (the field is a select over the allowlist now; an
-        // unknown guess would silently create an invalid selection).
-        if (body.version_guess && !acefw.version.trim()
-            && acefwVersions.value.some(v => v.version === body.version_guess))
-          acefw.version = body.version_guess;
+        // a TESTED one (the field is a select over the allowlist; an
+        // unknown guess would silently create an invalid selection) and
+        // only when it is unambiguous: several Gen-1 images share the
+        // 1.3.863 report string, and picking the wrong one would gate out
+        // the user's own file.
+        const matches = acefwVersionOptions.value.filter(
+          v => v.version === body.version_guess);
+        if (!acefw.version.trim() && matches.length === 1)
+          acefw.version = matches[0].id || matches[0].version;
       } catch (e) { acefw.uiError = `Upload: ${e.message || e}`; }
     }
     let _acefwTimer = null;
@@ -2305,11 +2342,18 @@ createApp({
       return acefwCanTest() && !!acefw.version.trim();
     }
     function acefwTest() { _acefwStart(true); }
+    // What the confirm dialog names: the entry's label, not the raw key
+    // (a Gen-1 key is an image id like '1.3.863-opencubic').
+    function acefwSelectedLabel() {
+      const v = acefwVersionOptions.value.find(
+        o => (o.id || o.version) === acefw.version);
+      return (v && (v.label || v.version)) || acefw.version.trim();
+    }
     function acefwFlash() {
       const patching = acefwCanPatch.value && !!acefw.patchToOpen;
       const tgt = patching
         ? (acefw.patchTarget || acefwPatchTarget.value)
-        : acefw.version.trim();
+        : acefwSelectedLabel();
       // Patching adds a SECOND warning: it flashes a community-modified,
       // NOT byte-tested image.
       const extra = patching
@@ -6961,7 +7005,7 @@ createApp({
       acefwCanTest, acefwReady, acefwTest, acefwFlash, acefwStatusText,
       acefwStatusBad,
       acefwPatchTarget, acefwPatchTargets, acefwTargetLabel, acefwCanPatch,
-      acefwVersions,
+      acefwVersions, acefwGen1Versions, acefwIsV1, acefwVersionOptions,
       spoolCreateFromPicker,
       spoolExport, spoolImport, triggerSpoolImport,
       isPrinting,

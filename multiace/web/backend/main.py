@@ -2934,10 +2934,12 @@ async def _sweep_kick_run() -> None:
     except Exception as e:
         _trace.warning("spoolman tag sweep (kick) failed: %s", e)
 
-# --- ACE 2 firmware update (OTA) ---------------------------------------
-# Flash engine: ace2_ota.py (based on hakimio's updater, see its header;
-# DEV-ONLY until his license OK). The PORT comes from Klipper:
-# ACE_FW_RELEASE disconnects the unit and holds every reconnect path,
+# --- ACE firmware update (Config tab) ----------------------------------
+# Flash engines, one per generation: ace2_ota.py for the ACE 2 (based on
+# hakimio's updater, see its header; DEV-ONLY until his license OK) and
+# ace1_flash.py for the Gen 1 ACE Pro (IAP JSON-RPC, see its header).
+# The PORT comes from Klipper in both cases: ACE_FW_RELEASE disconnects
+# the unit and holds every reconnect path (Gen 1 and Gen 2 alike),
 # ACE_FW_RESUME hands it back - so the flasher never fights the running
 # heartbeat for the serial port, and the other three units keep working.
 
@@ -2983,16 +2985,37 @@ async def acefw_upload(file: UploadFile = File(...)) -> dict:
 async def _acefw_run(ace: int, port: str, version: str,
                      password, md5, dry_run: bool, force: bool,
                      patch_to_open: bool = False,
-                     patch_target: str = "") -> None:
+                     patch_target: str = "",
+                     gen1: bool = False) -> None:
     def _prog(pct, msg):
         _acefw["pct"] = pct
         _acefw["msg"] = str(msg)
     try:
         _acefw["state"] = "flashing"
-        # Local import: a missing/broken flasher module must
+        # Local imports: a missing/broken flasher module must
         # break THIS request, never the uvicorn start.
-        import ace2_ota
         upload = str(_ACEFW_DIR / "upload.bin")
+        if gen1:
+            # Gen 1 (ACE Pro) IAP flasher - its own transport, its own
+            # tested-images gate (ace1_flash.check_known). `version` is
+            # the Gen-1 entry id, not a version string: both entries
+            # report 1.3.863, the md5 is what identifies the image.
+            import ace1_flash
+            fw, image_error = None, ""
+            try:
+                fw = await asyncio.to_thread(
+                    ace1_flash.load_image, upload, version, md5)
+            except Exception as e:
+                image_error = str(e)
+                # A real flash cannot proceed without the image; a dry
+                # run can still test the port + version (the file half is
+                # optional there, see flash()).
+                if not dry_run:
+                    raise
+            _acefw["result"] = await asyncio.to_thread(
+                ace1_flash.flash, port, fw, _prog, dry_run, image_error)
+            return
+        import ace2_ota
         fw, image_error = None, ""
         try:
             # patch_to_open: the user uploaded the STOCK V1.1.31 package;
@@ -3043,9 +3066,11 @@ async def _acefw_run(ace: int, port: str, version: str,
 
 @app.post("/api/acefw/flash")
 async def acefw_flash(payload: dict | None = None) -> dict:
-    """Release the port via Klipper, then flash in the background.
-    dry_run runs the identical chain (release, open, version query,
-    firmware parse) without writing anything - the 'Testlauf'."""
+    """Release the port via Klipper, then flash in the background with the
+    engine of the unit's generation (Gen 1 IAP / Gen 2 OTA - routed by the
+    protocol Klipper reports). dry_run runs the identical chain (release,
+    open, version query, firmware parse) without writing anything - the
+    'Testlauf'."""
     p = payload or {}
     if _acefw_running():
         raise HTTPException(409, "a firmware update is already running")
@@ -3055,6 +3080,11 @@ async def acefw_flash(payload: dict | None = None) -> dict:
         raise HTTPException(400, "ace index required")
     dry_run = bool(p.get("dry_run"))
     version = str(p.get("version") or "").strip()
+    # The client's pick, before a patch target may overwrite it below. On
+    # a Gen-1 target the patch stage does not exist, so the rewrite below
+    # is undone from here (a stray patch flag must not change which image
+    # the Gen-1 flasher is told to load).
+    version_req = version
     # Patch-to-Open: the upload is stock V1.1.31 and the backend patches it
     # to ACE2-Open before flashing. The effective TARGET (gate key + announce
     # base) then becomes ace2_ota.PATCH_TARGET regardless of the selected
@@ -3092,18 +3122,29 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     # - a real flash needs it, a dry run does not (it only reads the
     # current version). So it is required only for the actual flash.
     if not version and not dry_run:
-        raise HTTPException(400, "target version required (e.g. 1.1.31)")
-    # Fast reject for an unlisted version BEFORE the port release cycle -
-    # the byte-exact gate (check_known) sits in the flash path itself.
+        raise HTTPException(400, "target version required (a Gen-2 version "
+                                 "or a Gen-1 image id)")
+    # Fast reject for an unlisted target BEFORE the port release cycle -
+    # the byte-exact gate (check_known) sits in the matching flash path
+    # itself. A target may be a Gen-2 version string or a Gen-1 image id;
+    # whichever list knows it lets the request through, and the flasher
+    # picked below still has to accept the bytes.
     if version and not dry_run:
         try:
             import ace2_ota
-            _known = ace2_ota.KNOWN_FIRMWARE.get(version.lstrip("Vv"))
+            _known = ace2_ota.KNOWN_FIRMWARE.get(
+                version.lstrip("Vv")) is not None
         except Exception:
             _known = True    # module trouble -> the in-flash gate decides
-        if _known is None:
+        if not _known:
+            try:
+                import ace1_flash
+                _known = version in ace1_flash.KNOWN_FIRMWARE
+            except Exception:
+                _known = True
+        if not _known:
             raise HTTPException(
-                400, f"version {version} is not on the tested-versions list")
+                400, f"version {version} is not on the tested list")
     if not (_ACEFW_DIR / "upload.bin").exists():
         raise HTTPException(400, "no firmware file uploaded")
     state = _parse_state(await _query_state_gated())
@@ -3114,6 +3155,20 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     port = str(entry.get("serial_path") or "").strip()
     if not port:
         raise HTTPException(400, "ACE reports no serial path")
+    # Which generation owns this unit? The web sends the same payload for
+    # both; the routing is by the protocol Klipper detected, never by a
+    # client flag - a V1 image can never be fed to the ACE 2 engine.
+    gen1 = str(entry.get("protocol") or "").lower() == "v1"
+    if gen1 and patch_to_open:
+        # The ACE2-Open patcher is a Gen-2 stage on a Gen-2 stock image;
+        # ignore the flag on a Gen-1 target instead of feeding the
+        # patcher a Gen-1 image (which it would only reject). The patch
+        # rewrite above may also have replaced the picked version - put
+        # the client's own pick back before the Gen-1 flasher sees it.
+        patch_to_open, _target = False, ""
+        version = version_req
+        if not version and not dry_run:
+            raise HTTPException(400, "a Gen-1 image id is required")
     _acefw.update({"state": "releasing", "ace": ace, "pct": None,
                    "msg": "releasing serial port", "error": "",
                    "result": None})
@@ -3140,7 +3195,7 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     asyncio.create_task(_acefw_run(
         ace, port, version, p.get("password") or None,
         p.get("md5") or None, dry_run, bool(p.get("force")),
-        patch_to_open, _target))
+        patch_to_open, _target, gen1))
     return {"ok": True}
 
 
@@ -3151,15 +3206,21 @@ async def acefw_status() -> dict:
 
 @app.get("/api/acefw/versions")
 async def acefw_versions() -> dict:
-    """The tested-versions allowlist -
-    the UI's version dropdown offers exactly these; the byte gate sits in
-    ace2_ota.flash via check_known. The ACE2-Open build is NOT offered as
-    a direct target: it is reached by uploading stock 1.1.31 and ticking
-    'patch to ACE2-Open'. Its KNOWN_FIRMWARE entry stays - it is the
-    byte-exact gate for the patched image."""
+    """The tested-image allowlists, one per generation.
+    'versions' is the Gen-2 list - the UI's version dropdown offers exactly
+    these; the byte gate sits in ace2_ota.flash via check_known. The
+    ACE2-Open build is NOT offered as a direct target: it is reached by
+    uploading stock 1.1.31 and ticking 'patch to ACE2-Open'. Its
+    KNOWN_FIRMWARE entry stays - it is the byte-exact gate for the
+    patched image.
+    'gen1_versions' is the Gen-1 (ACE Pro) list - images, not versions:
+    the Gen-1 flasher announces 1.3.863 for every entry, so the entry id
+    selects the image and the md5 is the gate (ace1_flash.check_known).
+    'file' is the release asset name - the Gen-1 equivalent of the .swu
+    hint next to the Gen-2 versions."""
     try:
         import ace2_ota
-        return {"versions": [
+        out = {"versions": [
             {"version": v, "size": e.get("size"),
              "crc": "0x%04X" % e["crc"], "source": e.get("source", ""),
              # The googleable package name - shown in brackets behind the
@@ -3187,7 +3248,21 @@ async def acefw_versions() -> dict:
                 if ace2_ota.KNOWN_FIRMWARE.get(v)]
                 if hasattr(ace2_ota, "apply_open_patch") else [])}
     except Exception as e:
-        return {"versions": [], "error": str(e)}
+        out = {"versions": [], "error": str(e)}
+    try:
+        import ace1_flash
+        out["gen1_versions"] = [
+            {"id": k, "version": e.get("version", ""),
+             "label": e.get("label", ""), "file": e.get("file", ""),
+             "size": e.get("size"), "crc": "0x%04X" % e["crc"],
+             "md5": e.get("md5", ""), "source": e.get("source", ""),
+             "tested": e.get("tested", "")}
+            for k, e in ace1_flash.KNOWN_FIRMWARE.items()]
+    except Exception as e:
+        # A broken Gen-1 module must not take the Gen-2 list down with it.
+        out["gen1_versions"] = []
+        out["gen1_error"] = str(e)
+    return out
 
 # What this process last knew Spoolman's PA field to hold, per smid - the
 # piggyback push's change gate. RAM only: after a backend restart the first
