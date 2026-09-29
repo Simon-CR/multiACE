@@ -1061,6 +1061,16 @@ class MultiAce:
         # Config tab): a user choice lives in the config line.
         self.tag_write_uid_sku = config.getboolean('tag_write_uid_sku', True)
         self._tag_write_uid_sku_cfg = self.tag_write_uid_sku
+        # Gen-1 (ACE Pro) tag tunnel (ace_gen1_tunnel.py): when ON, a slot
+        # the firmware could not identify gets ONE opportunistic page read
+        # through the community firmware's RC522 tunnel, so a third-party
+        # spool surfaces with its card UID (and, for an OpenSpool tag, its
+        # material/colour). OFF by default: on a unit without the tunnel
+        # the option only produces one log line, and ACE_TAG_READ is the
+        # explicit probe either way. Read unconditionally (config-halt
+        # trap); write-through to the gen1_tag_tunnel line.
+        self.gen1_tag_tunnel = config.getboolean('gen1_tag_tunnel', False)
+        self._gen1_tag_tunnel_cfg = self.gen1_tag_tunnel
 
         # Auto-dry: humidity-controlled drying. Only an ACE 2 can drive it -
         # it is the only one reporting a humidity reading (cmd 6 field 4); an
@@ -1146,6 +1156,16 @@ class MultiAce:
         # first status after boot binds every occupied slot once.
         self._v1_tag_seen = {}
         self._native_name_seen = {}
+        # Gen-1 tag tunnel (ace_gen1_tunnel.py): the per-unit client cache,
+        # the per-slot tunnel reads ({idx: {slot: {...}}}, own store - never
+        # _info_per_ace; the 1 Hz heartbeat rebuilds that dict) and the
+        # one-session-per-unit busy set. Cleared with the device-coupled
+        # read cache on disconnect (_drop_device_tag_reads) and per slot
+        # when that slot turns empty (_gen1_tunnel_status_tick).
+        self._gen1_tunnel_clients = {}
+        self._gen1_tunnel_reads = {}
+        self._gen1_tunnel_tried = {}
+        self._gen1_tunnel_busy = set()
         # Per-connection tag-rescan marker: set in _open_ace (boot AND
         # reconnect share that path), consumed by the first status merge
         # (_merge_v2_filament_info -> _v2_rfid_boot_rescan). V2 only -
@@ -2097,6 +2117,9 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_TAG_WRITE', self.cmd_ACE_TAG_WRITE,
             desc=self.cmd_ACE_TAG_WRITE_help)
+        self.gcode.register_command(
+            'ACE_SET_TAG_TUNNEL', self.cmd_ACE_SET_TAG_TUNNEL,
+            desc=self.cmd_ACE_SET_TAG_TUNNEL_help)
 
         self.gcode.register_command(
             'ACE_RAW_PROBE',
@@ -5861,9 +5884,12 @@ class MultiAce:
         # needless reconnect while the device idled.
         # filament_identify is a sensor read too (RFID scan, no motor) -
         # stamping it would blip 'busy' from the connect-time tag rescan.
+        # filament_recognition carries the Gen-1 tunnel ops (one page read
+        # is ~20 of them): a sensor read as well, and stamping 'busy' per
+        # op would make the UI flicker and starve wait_ace_ready.
         if request.get('method') not in (
                 'get_status', 'get_feed_info', 'get_filament_info',
-                'filament_identify'):
+                'filament_identify', 'filament_recognition'):
             info['status'] = 'busy'
         msg_id = self._next_request_id_for(idx)
         cb_map = self._callback_maps.setdefault(idx, {})
@@ -7168,7 +7194,11 @@ class MultiAce:
         DEVICE-coupled cmd13 reads go (the device re-reports them); host
         reads stay - they were restored from save_variables at init and
         the first connect would wipe the whole per-unit dict right after.
-        The empty-slot rule in the merge remains their only eviction."""
+        The empty-slot rule in the merge remains their only eviction.
+        Gen-1 tunnel reads are session truth like a device read (the tag
+        may have been swapped while the unit was gone): dropped here."""
+        self._gen1_tunnel_reads.pop(idx, None)
+        self._gen1_tunnel_tried.pop(idx, None)
         slots = self._v2_filament_info_per_ace.get(idx)
         if not slots:
             return
@@ -7996,6 +8026,11 @@ class MultiAce:
                 self._merge_v2_filament_info(idx, result)
                 self._strip_native_tag_names(idx, result)
                 self._v1_tag_bind_from_status(idx, result)
+                # Gen-1 third-party fallback: a slot the firmware could not
+                # identify (or whose SKU matches no table entry) gets ONE
+                # opportunistic tunnel read, so its card UID surfaces. A
+                # no-op on V2 (and with the feature off).
+                self._gen1_tunnel_status_tick(idx, result)
                 # Split a merged RFID type ('PLA Glow') into base + subtype
                 # against the firmware material list, centrally, so type is a
                 # printable base everywhere downstream (get_status, head_source,
@@ -12173,6 +12208,24 @@ class MultiAce:
         self.log_always('[multiACE] PA sync %s%s'
                         % ('ON' if enable else 'OFF', sfx))
 
+    cmd_ACE_SET_TAG_TUNNEL_help = (
+        '[multiACE] Enable/disable the Gen-1 (ACE Pro) tag tunnel '
+        '(ENABLE=0|1): ON gives a slot the firmware could not identify ONE '
+        'opportunistic tag read through the community firmware RC522 tunnel '
+        '(CV1.3.87x) per insert, so third-party spools surface with their '
+        'card UID (and OpenSpool material/colour). ACE_TAG_READ works with '
+        'the flag off too. Live + write-through (writes the gen1_tag_tunnel '
+        'config line; PERSIST=0 = until restart).')
+
+    def cmd_ACE_SET_TAG_TUNNEL(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self.gen1_tag_tunnel = enable
+        sfx = self._wt_persist(gcmd, 'gen1_tag_tunnel', _wt_fmt_bool(enable),
+                               None, shadow_attr='_gen1_tag_tunnel_cfg',
+                               shadow_val=enable)
+        self.log_always('[multiACE] Gen-1 tag tunnel %s%s'
+                        % ('ON' if enable else 'OFF', sfx))
+
     def cmd_ACE_SET_TAG_WRITE(self, gcmd):
         """Defaults for ACE_TAG_WRITE / the picker's write button. Each
         given field is applied live and written through to its config
@@ -13189,6 +13242,224 @@ class MultiAce:
         except Exception as e:
             logging.info('[multiACE] [spool] V1 tag bind failed (ignored): '
                          '%s' % e)
+
+    # ---- Gen-1 tag tunnel (ace_gen1_tunnel.py) ---------------------------
+    # The ACE Pro's own reader only understands Anycubic tags: a third-party
+    # spool arrives with no SKU (or an SKU no table entry carries). On the
+    # community firmware (CV1.3.87x) an RC522 tunnel can read such a tag
+    # directly, so this path probes a slot ONCE per occupancy, stores the
+    # result in its own dict (never _info_per_ace) and offers the card UID
+    # to the SHARED tag-bind path. Unbind is deliberately OFF on that call:
+    # a tunnel read must never release a binding the vendor path owns.
+
+    def _gen1_tunnel_client(self, idx):
+        """The cached per-unit client, or None when the helper module is
+        missing (deploy skew: an updated ace.py before the installer ran)
+        or the client cannot be built."""
+        cli = self._gen1_tunnel_clients.get(idx)
+        if cli is not None:
+            return cli
+        try:
+            # Broad on purpose: a broken helper module must cost this
+            # feature, never Klipper (boundary to optional local code).
+            from .ace_gen1_tunnel import Gen1TagTunnel
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: helper module not '
+                         'importable (%s) - re-run the installer to enable '
+                         'it' % e)
+            return None
+        try:
+            cli = Gen1TagTunnel(self, idx)
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: client init failed '
+                         '(%s)' % e)
+            return None
+        self._gen1_tunnel_clients[idx] = cli
+        return cli
+
+    def _gen1_tunnel_status_tick(self, idx, result):
+        """Pro' status hook: decide whether any slot needs ONE tunnel read.
+
+        Candidate = a slot that is occupied and whose tag the firmware did
+        NOT identify (rfid != 2 / empty sku) or whose SKU matches no table
+        entry. Per occupancy session (empty -> present) there is AT MOST
+        ONE attempt: the tag only answers while it faces the coil, the
+        firmware rotates the spool during its own insert procedure, and a
+        Gen-1 has no host-side motor control to search for it later.
+        ACE_TAG_READ is the explicit retry. Never runs on V2; never runs
+        with the feature off; never touches _info_per_ace.
+
+        Binding is gated on ATTRIBUTION: the two slots of an antenna pair
+        (0/2 and 1/3) share one RF path, so a read can belong to either
+        bay. The automatic read binds the slot's spool ONLY when the
+        partner slot (slot ^ 1) reads EMPTY in the same status; an
+        occupied OR unknown/absent partner still stores and surfaces the
+        read but does not bind (a wrong first binding has no repair path
+        here - see the tunnel report, section 4)."""
+        try:
+            if not self.gen1_tag_tunnel or self._is_v2(idx):
+                return
+            if not self._connected_per_ace.get(idx):
+                return
+            if idx in self._gen1_tunnel_busy:
+                return
+            tried = self._gen1_tunnel_tried.setdefault(idx, {})
+            reads = self._gen1_tunnel_reads.get(idx) or {}
+            slots = result.get('slots') or []
+            for i, slot in enumerate(slots):
+                if not isinstance(slot, dict):
+                    continue
+                if self._is_empty_status(slot.get('status', '')):
+                    # Occupancy ended: the next spool is a new read.
+                    tried.pop(i, None)
+                    reads.pop(i, None)
+                    continue
+                sku = slot.get('sku') if slot.get('rfid') == 2 else ''
+                if self._sku_canon(sku):
+                    _, sp = self._spool_by_sku(sku)
+                    if sp is not None:
+                        continue       # firmware read a tag we know
+                # No vendor tag, or one no entry carries: worth a probe.
+                if tried.get(i):
+                    continue
+                # Shared-antenna attribution: the partner bay (slot ^ 1)
+                # must read empty; occupied OR unknown/absent is NOT
+                # empty (conservative - do not bind a possibly-wrong read).
+                partner = slots[i ^ 1] if (i ^ 1) < len(slots) else None
+                partner_empty = (isinstance(partner, dict)
+                                 and self._is_empty_status(
+                                     partner.get('status', '')))
+                tried[i] = True
+                self._gen1_tunnel_schedule(idx, i, bind=partner_empty)
+                # ONE session per unit at a time: the next candidate (if
+                # any) gets its attempt on a following heartbeat.
+                break
+            if reads:
+                self._gen1_tunnel_reads[idx] = reads
+            elif idx in self._gen1_tunnel_reads:
+                self._gen1_tunnel_reads.pop(idx, None)
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: status tick failed '
+                         '(ignored): %s' % e)
+
+    def _gen1_tunnel_schedule(self, idx, slot, bind=True):
+        """Queue ONE tunnel read in its own greenlet (the reply poll uses
+        reactor.pause, which must not run in the heartbeat callback).
+        `bind` carries the shared-antenna attribution decision from the
+        tick through to the store: False still reads and stores, but does
+        not offer the UID to the tag bind."""
+        cli = self._gen1_tunnel_client(idx)
+        if cli is None:
+            return
+        self._gen1_tunnel_busy.add(idx)
+
+        def _run(eventtime):
+            try:
+                if not cli.tunnel_available():
+                    return             # one log line, then never again
+                res = cli.read_slot(slot)
+                if res:
+                    self._gen1_tunnel_store(idx, slot, res, why='auto',
+                                            bind=bind)
+                else:
+                    logging.info(
+                        '[multiACE] gen1 tag tunnel: ACE %d slot %d: no '
+                        'tag answered on the antenna (tag must face the '
+                        'coil) - one attempt per insert, ACE_TAG_READ '
+                        'retries on demand', self._disp(idx),
+                        self._disp(slot))
+            except Exception as e:
+                logging.info('[multiACE] gen1 tag tunnel: read failed on '
+                             'ACE %d slot %d (ignored): %s'
+                             % (self._disp(idx), self._disp(slot), e))
+            finally:
+                self._gen1_tunnel_busy.discard(idx)
+
+        try:
+            self.reactor.register_async_callback(_run)
+        except Exception as e:
+            self._gen1_tunnel_busy.discard(idx)
+            logging.info('[multiACE] gen1 tag tunnel: schedule failed '
+                         '(ignored): %s' % e)
+
+    def _gen1_tunnel_store(self, idx, slot, res, why='auto', bind=True):
+        """Record one tunnel read and offer its card UID to the SHARED
+        tag-bind path (unbind=False - the tunnel never releases a vendor
+        binding). Own store; the heartbeat's _info_per_ace is untouched.
+
+        `bind` is the shared-antenna attribution gate: the automatic path
+        passes False when the partner slot (slot ^ 1) is occupied or
+        unknown, so a read that could belong to the neighbour bay is
+        STORED and surfaced in get_status but never binds. The manual
+        ACE_TAG_READ path leaves it True (the operator chose the slot)."""
+        try:
+            op = res.get('openspool') or {}
+            ent = {
+                'uid': res.get('uid', ''),
+                'format': res.get('format', 'unknown'),
+                'material': op.get('material', ''),
+                'color': op.get('color', ''),
+                # The V2 decoder names this 'vendor' (OpenSpool's JSON
+                # 'brand'); keep the stored/status key as 'brand'.
+                'brand': op.get('vendor', ''),
+                'page0': ' '.join('%02X' % b
+                                  for b in bytes(res.get('data') or b'')),
+                'ts': self.reactor.monotonic(),
+                'why': why,
+                'bound': False,
+            }
+            uid = ent['uid']
+            ent['bound'] = bool(uid and bind)
+            self._gen1_tunnel_reads.setdefault(idx, {})[slot] = ent
+            if uid:
+                logging.info(
+                    '[multiACE] [spool] gen1 tunnel read ACE %d slot %d: '
+                    'card UID %s (%s)%s', self._disp(idx), self._disp(slot),
+                    uid, ent['format'],
+                    ' - OpenSpool %s %s %s' % (
+                        ent['material'] or '?', ent['color'] or '?',
+                        ent['brand'] or '?') if op else '')
+                if bind:
+                    self._spool_bind_by_tag(idx, slot, uid, unbind=False)
+                else:
+                    logging.info(
+                        '[multiACE] gen1 tunnel read ACE %d slot %d: card '
+                        'UID %s (%s) STORED but NOT bound - the partner '
+                        'slot on the shared antenna is occupied or '
+                        'unknown, so the read cannot be attributed to this '
+                        'slot; ACE_TAG_READ is the operator probe',
+                        self._disp(idx), self._disp(slot), uid,
+                        ent['format'])
+            else:
+                logging.info(
+                    '[multiACE] gen1 tunnel read ACE %d slot %d: a card '
+                    'answered but no readable page (format %s) - no UID',
+                    self._disp(idx), self._disp(slot), ent['format'])
+        except Exception as e:
+            logging.info('[multiACE] gen1 tunnel store failed (ignored): %s'
+                         % e)
+
+    def _gen1_tunnel_status(self, idx):
+        """The additive get_status block for one unit."""
+        out = {'enabled': bool(getattr(self, 'gen1_tag_tunnel', False)),
+               'available': None, 'reads': {}}
+        cli = self._gen1_tunnel_clients.get(idx)
+        if cli is not None:
+            sup = cli.support_state()
+            if sup is not None:
+                out['available'] = bool(sup[1])
+        now = self.reactor.monotonic()
+        for slot, ent in (self._gen1_tunnel_reads.get(idx) or {}).items():
+            out['reads'][str(slot)] = {
+                'uid': ent.get('uid', ''),
+                'format': ent.get('format', ''),
+                'material': ent.get('material', ''),
+                'color': ent.get('color', ''),
+                'brand': ent.get('brand', ''),
+                'bound': bool(ent.get('bound', False)),
+                'age': max(0.0, now - float(ent.get('ts', now))),
+            }
+        return out
 
     def _spool_rebind_from_tag_cache(self, why):
         """Re-run the tag auto-bind against the LAST READ tag of every
@@ -14617,18 +14888,26 @@ class MultiAce:
                                 % (spool.get('label') or sid))
 
     cmd_ACE_TAG_READ_help = (
-        '[multiACE] Rotate a slot until its RFID tag sits in front of the '
-        'antenna, read it and bind the matching spool: ACE_TAG_READ ACE=n '
-        'SLOT=n [MAX_MM=600] [DEBUG=1] [DUMP=1]. Needs the ACE2-Open '
-        'firmware. DEBUG '
-        'logs each raw RC522 step, DUMP logs the NTAG user pages (OpenSpool '
-        'decode data). Idle printer only - the search physically rotates '
-        'the lane (restored afterwards).')
+        '[multiACE] Read a slot\'s RFID tag. ACE 2 (ACE2-Open firmware): '
+        'rotate the slot until the tag sits in front of the antenna, read '
+        'it and bind the matching spool - ACE_TAG_READ ACE=n SLOT=n '
+        '[MAX_MM=600] [DEBUG=1] [DUMP=1]; needs an idle printer (the search '
+        'physically rotates the lane, restored afterwards). ACE Pro (Gen 1, '
+        'community firmware with the RC522 tunnel): read the tag directly - '
+        'ACE_TAG_READ ACE=n SLOT=n [PAGE=n] prints the raw page bytes and '
+        'the card UID; moves nothing, safe during a print. PAGE defaults to '
+        '0; the tag must face the coil.')
 
     def cmd_ACE_TAG_READ(self, gcmd):
         ace_idx = gcmd.get_int('ACE', self._active_device_index,
                                minval=0, maxval=3)
         slot = gcmd.get_int('SLOT', minval=0, maxval=3)
+        if not self._is_v2_idx(ace_idx):
+            # Gen-1 (ACE Pro): the community firmware's RC522 tunnel is the
+            # only reader route (docs/GEN1_TAG_TUNNEL.md). Read-only, no
+            # lane motion - allowed on a printing printer too.
+            self._cmd_ace_tag_read_gen1(gcmd, ace_idx, slot)
+            return
         max_mm = gcmd.get_int('MAX_MM', 600, minval=50, maxval=2000)
         debug = gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
         dump = gcmd.get_int('DUMP', 0, minval=0, maxval=1)
@@ -14718,6 +14997,130 @@ class MultiAce:
         self.reactor.register_async_callback(_run)
         gcmd.respond_info('[multiACE] tag read started (ACE %d slot %d)'
                           % (self._disp(ace_idx), self._disp(slot)))
+
+    def _cmd_ace_tag_read_gen1(self, gcmd, ace_idx, slot):
+        """ACE_TAG_READ on an ACE Pro (Gen 1): one tunnel read session.
+
+        The command itself is the explicit consent - it runs with the
+        gen1_tag_tunnel config flag off (the flag gates only the automatic
+        fallback). Synchronous is not an option in the gcode thread, so the
+        read runs in its own greenlet; the console gets the raw page bytes
+        and the UID. The result also feeds the own-store/status surface and
+        the SHARED tag bind (unbind=False) exactly like an automatic read."""
+        page = gcmd.get_int('PAGE', 0, minval=0, maxval=255)
+        if not self._connected_per_ace.get(ace_idx):
+            raise self._ace_error(gcmd, 'ACE %d is not connected'
+                                  % self._disp(ace_idx), code=208)
+        if ace_idx in self._gen1_tunnel_busy:
+            raise self._ace_error(gcmd, 'a Gen-1 tag read is already running '
+                                  'on ACE %d' % self._disp(ace_idx), code=200)
+        cli = self._gen1_tunnel_client(ace_idx)
+        if cli is None:
+            raise self._ace_error(gcmd, 'the Gen-1 tag tunnel helper '
+                                  '(ace_gen1_tunnel.py) is missing on this '
+                                  'install - re-run the installer', code=200)
+        self._gen1_tunnel_busy.add(ace_idx)
+        # Same outcome contract as the V2 read (ace.py's tag_op status):
+        # the web picker bar can report this op when/if it is offered on a
+        # Gen 1. seq ties the result to the call.
+        self._tag_op_kind = 'read'
+        self._tag_op_seq = int(getattr(self, '_tag_op_seq', 0)) + 1
+        self._tag_op_result = None
+        _seq = self._tag_op_seq
+        _out = {'ok': None, 'msg': ''}
+
+        def _run(eventtime):
+            try:
+                if not cli.tunnel_available():
+                    fw = (self._ace_models.get(ace_idx) or ('', '?'))[1]
+                    _out['ok'] = False
+                    _out['msg'] = ('no tag tunnel (firmware %s, needs the '
+                                   'community build CV1.3.87x)' % fw)
+                    self.log_always(
+                        '[multiACE] ACE %d: no tag tunnel - firmware %s '
+                        'does not answer tunnel ops (needs the community '
+                        'build %s); nothing read'
+                        % (self._disp(ace_idx), fw,
+                           'CV1.3.87x'))
+                    return
+                res = cli.read_slot(slot, page=page)
+                if not res:
+                    _out['ok'] = False
+                    _out['msg'] = 'no tag answered (tag must face the coil)'
+                    self.log_always(
+                        '[multiACE] ACE %d slot %d page %d: no tag answered '
+                        'on the antenna - the tag must face the coil, then '
+                        'retry' % (self._disp(ace_idx), self._disp(slot),
+                                   page))
+                    return
+                _out['ok'], _out['msg'] = self._gen1_tunnel_report(
+                    ace_idx, slot, res)
+                self._gen1_tunnel_store(ace_idx, slot, res, why='manual')
+            except Exception as e:
+                _out['ok'] = False
+                _out['msg'] = 'read failed: %s' % e
+                self.log_always('[multiACE] ACE %d slot %d: tag read failed: '
+                                '%s' % (self._disp(ace_idx),
+                                        self._disp(slot), e))
+                logging.exception('[multiACE] gen1 tag tunnel: read_slot')
+            finally:
+                self._gen1_tunnel_busy.discard(ace_idx)
+                self._tag_op_result = {
+                    'ok': bool(_out['ok']), 'kind': 'read', 'seq': _seq,
+                    'msg': (_out['msg'] or 'no tag read')[:200]}
+
+        try:
+            self.reactor.register_async_callback(_run)
+        except Exception as e:
+            self._gen1_tunnel_busy.discard(ace_idx)
+            raise self._ace_error(gcmd, 'could not schedule the Gen-1 tag '
+                                  'read (%s)' % e, code=200)
+        gcmd.respond_info('[multiACE] Gen-1 tag read started (ACE %d slot '
+                          '%d page %d)' % (self._disp(ace_idx),
+                                           self._disp(slot), page))
+
+    def _gen1_tunnel_report(self, ace_idx, slot, res):
+        """Console report of ONE finished tunnel read: the raw page bytes
+        first, then the UID and what the bytes are (third-party format).
+        Returns (ok, short_message) for the command's tag_op result."""
+        try:
+            data = res.get('data') or b''
+            page = res.get('page', 0)
+            self.log_always('[multiACE] ACE %d slot %d page %d: %s'
+                            % (self._disp(ace_idx), self._disp(slot), page,
+                               ' '.join('%02X' % b for b in data)))
+            uid = res.get('uid', '')
+            fmt = res.get('format', '')
+            op = res.get('openspool') or {}
+            if uid:
+                if op:
+                    extra = (' - OpenSpool tag: %s %s %s'
+                             % (op.get('material') or '?',
+                                op.get('color') or '?',
+                                op.get('vendor') or '?'))
+                elif fmt == 'ntag':
+                    extra = ' - plain NTAG (no OpenSpool NDEF record)'
+                elif fmt == 'anycubic':
+                    extra = ' - Anycubic layout'
+                else:
+                    extra = ''
+                msg = 'UID %s (%s)' % (uid, fmt or 'unknown')
+                self.log_always('[multiACE] ACE %d slot %d: %s%s - '
+                                'third-party tag'
+                                % (self._disp(ace_idx), self._disp(slot),
+                                   msg, extra))
+                return True, msg
+            if fmt == 'unknown':
+                self.log_always(
+                    '[multiACE] ACE %d slot %d: a card answered SELECT but '
+                    'returned no readable NTAG page (MIFARE?) - no UID'
+                    % (self._disp(ace_idx), self._disp(slot)))
+                return True, 'card answered, no readable page (MIFARE?)'
+            return True, 'card read, no UID on this page'
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: report failed '
+                         '(ignored): %s' % e)
+            return True, 'read done'
 
     def _tag_read_guards(self, gcmd, ace_idx, slot):
         """Shared refusals for the RC522 tag commands. Raises _ace_error;
@@ -21065,6 +21468,14 @@ class MultiAce:
             for n, s in enumerate(info.get('slots', []) or []):
                 if not isinstance(s, dict):
                     continue
+                # Gen-1 tunnel read for this slot (own store, never
+                # _info_per_ace): it supplies the card UID the Pro's own
+                # reader cannot deliver for a third-party tag. A device
+                # value always wins - the tunnel only fills the gap.
+                _tt = (self._gen1_tunnel_reads.get(i) or {}).get(
+                    s.get('index', n))
+                if not isinstance(_tt, dict):
+                    _tt = {}
                 slots_out.append({
                     'index':    s.get('index', n),
                     'status':   s.get('status', ''),
@@ -21076,16 +21487,20 @@ class MultiAce:
                     'color':    s.get('color', [0, 0, 0]),
                     # Card UID of the last host read (UID-first line);
                     # the merge sets it, this list is explicit so it
-                    # never reached the web.
-                    'uid':      s.get('uid', ''),
+                    # never reached the web. On a Gen 1 the tunnel read is
+                    # such a host read - the device's own value wins when
+                    # it has one.
+                    'uid':      s.get('uid', '') or _tt.get('uid', ''),
                     # anycubic / openspool / mifare / unknown. A
                     # DEVICE read (rfid==2 from the firmware - every V1
                     # slot, and V2 slots the firmware read itself) is by
                     # definition the Anycubic layout; only host reads
-                    # carry another format.
+                    # carry another format. A Gen-1 tunnel read supplies
+                    # it when the firmware delivered none.
                     'tag_format': (s.get('tag_format', '')
                                    or ('anycubic' if s.get('rfid') == 2
-                                       else '')),
+                                       else '')
+                                   or _tt.get('format', '')),
                 })
             protocol = self._protocols.get(i)
             # Pushed external reading (ACE_SET_HUMIDITY): last value, age,
@@ -21125,6 +21540,10 @@ class MultiAce:
                 'dryer_status': info.get('dryer_status', {}),
                 'gate_status':  self._gate_status_per_ace.get(i, []),
                 'feed_assist':  self._feed_assist_per_ace.get(i, -1),
+                # Gen-1 tag tunnel (own store, never _info_per_ace):
+                # enabled flag, probe result (None = never probed) and the
+                # last read per slot. Additive; empty reads on a V2.
+                'tag_tunnel':   self._gen1_tunnel_status(i),
                 # For the web backend's ACE 2 OTA updater: which device
                 # node to open once the port is released, and whether the
                 # release hold is active right now.
@@ -21231,6 +21650,9 @@ class MultiAce:
                 ('tag_write_uid_sku',
                  getattr(self, 'tag_write_uid_sku', None),
                  getattr(self, '_tag_write_uid_sku_cfg', None)),
+                ('gen1_tag_tunnel',
+                 getattr(self, 'gen1_tag_tunnel', None),
+                 getattr(self, '_gen1_tag_tunnel_cfg', None)),
             ) if _cfgv is not None and _cur != _cfgv],
             # Spool table: str keys (orjson: int keys shut
             # the printer down), weights are estimates.
