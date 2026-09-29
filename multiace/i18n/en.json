@@ -962,6 +962,7 @@
     "auto_dry_stop": "[multiACE] Auto-dry: ACE {ace} done ({why})",
     "auto_dry_config": "[multiACE] Auto-dry ACE {ace}: {state}, start {start}%rH, stop {end}%rH, {temp} °C",
     "auto_dry_config_follower": "[multiACE] Auto-dry ACE {ace} (follower): {state}, master {master}, {temp} °C, runs on {add} min",
+    "ace_humidity_set": "[multiACE] ACE {ace} external humidity: {rh}%rH{temp}, valid for {ttl}s{ttl_note}",
     "spool_sku_taken": "[multiACE] Tag code {sku} already belongs to spool #{id}. A code may belong to only ONE spool - pick another one (an existing assignment is never overwritten).",
     "head_feeder_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to switch between feeder and ACE",
     "head_ace_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change which ACE feeds it",

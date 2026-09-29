@@ -962,6 +962,7 @@
     "auto_dry_stop": "[multiACE] Auto-Trocknung: ACE {ace} fertig ({why})",
     "auto_dry_config": "[multiACE] Auto-Trocknung ACE {ace}: {state}, Start {start}%rH, Stopp {end}%rH, {temp} °C",
     "auto_dry_config_follower": "[multiACE] Auto-Trocknung ACE {ace} (Follower): {state}, Master {master}, {temp} °C, läuft {add} min nach",
+    "ace_humidity_set": "[multiACE] ACE {ace} externe Luftfeuchtigkeit: {rh}%rH{temp}, gültig für {ttl}s{ttl_note}",
     "spool_sku_taken": "[multiACE] Der Tag-Code {sku} gehört schon zu Spule #{id}. Ein Code darf nur zu EINER Spule gehören - wähl einen anderen (eine bestehende Zuordnung wird nie überschrieben).",
     "head_feeder_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann zwischen Feeder und ACE umschalten",
     "head_ace_loaded": "[multiACE] Kopf {head} hat noch Filament geladen - erst entladen, dann den zugeordneten ACE ändern",

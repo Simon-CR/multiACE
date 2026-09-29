@@ -434,6 +434,25 @@ AUTO_DRY_SOFT_START_TEMP = 50
 AUTO_DRY_SOFT_STEP = 5
 AUTO_DRY_SOFT_STEP_SECONDS = 300.
 
+# External humidity (ACE_SET_HUMIDITY): a reading pushed over gcode by a
+# sensor stack outside the ACE (BLE feeder, Home Assistant, MQTT bridge), so
+# even an ACE Pro - which has no sensor of its own - can drive its cycle.
+# Kept OUT of _info_per_ace: the 1 Hz heartbeat rebuilds that dict and would
+# wipe the value within a second. Per unit and with a TTL; a reading older
+# than its TTL counts as absent everywhere, and a dry cycle that was STARTED
+# from one is stopped when it expires (never keep heating on a value nobody
+# is refreshing). TTL is clamped to the range below: MIN is one control tick
+# (AUTO_DRY_INTERVAL), MAX keeps a forgotten feeder from authorising hours
+# of drying on a stale value.
+EXTERNAL_RH_DEFAULT_TTL = 900.0
+EXTERNAL_RH_MIN_TTL = 60.0
+EXTERNAL_RH_MAX_TTL = 7200.0
+# Plausible sensor temperature range (informational - nothing regulates on
+# it). The dryer box can reach the unit's own dryer ceiling; a reading far
+# outside that is a broken sensor, not a temperature.
+EXTERNAL_RH_TEMP_MIN = 0.0
+EXTERNAL_RH_TEMP_MAX = 100.0
+
 SPOOL_SAMPLE_INTERVAL = 1.0
 SPOOL_FLUSH_INTERVAL = 60.0          # disk writes: see _spool_sample_tick
 # Euclidean RGB distance above which a tag colour and its table entry are
@@ -1145,6 +1164,16 @@ class MultiAce:
         # backstop with no stop path left.
         self._auto_dry_follow_until = {}
         self._auto_dry_seen = {}
+        # Pushed external humidity (ACE_SET_HUMIDITY): idx -> {'rh', 'temp',
+        # 'ts', 'ttl'}. Monotonic ts, and the store deliberately dies with
+        # the process - a reading that outlived a Klipper restart has no age
+        # we could trust. The set remembers which of OUR cycles were started
+        # from such a reading; a feeder stops refreshing when something is
+        # wrong, and the cycle must not outlive the reading (persisted, so
+        # the first tick after a restart can stop a still-running cycle
+        # instead of letting it burn the device backstop).
+        self._external_rh = {}
+        self._external_rh_cycle = set()
         if self.save_variables:
             _sv = self.save_variables.allVariables.get('ace__auto_dry_running',
                                                        None)
@@ -1158,6 +1187,10 @@ class MultiAce:
                         int(k): float(v) for k, v in _sv.items()}
                 except (TypeError, ValueError):
                     self._auto_dry_follow_until = {}
+            _sv = self.save_variables.allVariables.get(
+                'ace__auto_dry_external', None)
+            if isinstance(_sv, (list, tuple)):
+                self._external_rh_cycle = set(int(i) for i in _sv)
 
         # Spoolman. The printer holds the SETTING (url + auto-sync), the web
         # backend does the actual HTTP - Klipper must never block on a network
@@ -2005,7 +2038,12 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_SET_AUTO_DRY',
             self.cmd_ACE_SET_AUTO_DRY,
-            desc='[multiACE] Humidity-controlled drying per ACE 2, live + persist')
+            desc='[multiACE] Humidity-controlled drying per ACE (own sensor '
+                 'or external ACE_SET_HUMIDITY), live + persist')
+        self.gcode.register_command(
+            'ACE_SET_HUMIDITY',
+            self.cmd_ACE_SET_HUMIDITY,
+            desc=self.cmd_ACE_SET_HUMIDITY_help)
         self.gcode.register_command(
             'ACE_PA_CALIBRATE',
             self.cmd_ACE_PA_CALIBRATE,
@@ -11645,106 +11683,132 @@ class MultiAce:
             self.log_always('[multiACE] Preflight copies strict colour '
                             'match: %s%s' % ('ON' if st else 'OFF', sfx))
 
+    def _gcode_num(self, gcmd, param, lo, hi, cast=float):
+        """One optional numeric gcode parameter, ranged by hand.
+
+        Ranges checked HERE, not via gcmd.get_*(minval=): Klipper's own
+        parameter error surfaces as a bare level-3 "System error" popup with
+        no hint of which value was wrong, and a single bad field then aborts
+        the whole command - which is how an ENABLE=1 was lost together with
+        a mistyped RH_START. Returns None for an absent parameter."""
+        raw = gcmd.get(param, None)
+        if raw is None:
+            return None
+        try:
+            val = cast(float(raw))
+        except (TypeError, ValueError, OverflowError):
+            raise self._ace_error(
+                gcmd, '%s: "%s" is not a number' % (param, raw), code=200)
+        # NaN/inf parse fine and would compare False against every bound,
+        # then poison the control loop - reject them by name.
+        if not math.isfinite(val):
+            raise self._ace_error(
+                gcmd, '%s: "%s" is not a finite number' % (param, raw),
+                code=200)
+        if val < lo or val > hi:
+            raise self._ace_error(
+                gcmd, '%s must be between %g and %g (got %g)'
+                      % (param, lo, hi, val), code=200)
+        return val
+
     cmd_ACE_SET_AUTO_DRY_help = (
-        '[multiACE] Humidity-controlled drying for one ACE 2: '
+        '[multiACE] Humidity-controlled drying for one ACE: '
         'ACE_SET_AUTO_DRY ACE=n [ENABLE=0|1] [RH_START=45] [RH_END=35] '
-        '[TEMP=50] [MASTER=0|1] [ADD_TIME=60] [RESET=1]. MASTER also drives '
-        'the ACE Pros (they report no humidity); ADD_TIME is the minutes '
-        'they keep going after the master is satisfied. Live + persisted as '
-        'ace__auto_dry.')
+        '[TEMP=50] [MASTER=0|1] [ADD_TIME=60] [RESET=1]. A unit with a '
+        'reading of its own - an ACE 2 sensor, or a pushed ACE_SET_HUMIDITY '
+        'value on ANY generation - regulates on it; a unit without one '
+        'follows a master. ADD_TIME is the minutes a follower keeps going '
+        'after the master is satisfied. Live + persisted as ace__auto_dry.')
 
     def cmd_ACE_SET_AUTO_DRY(self, gcmd):
         idx = gcmd.get_int('ACE', minval=0, maxval=3)
-        # Both unit types are configurable now, with DISJOINT parameter sets:
-        # an ACE 2 regulates (rh_start/rh_end/temp), an ACE Pro follows one
-        # ACE 2 (master/temp/add_time). Taking a parameter the unit cannot
-        # act on would silently store a setting that never does anything -
-        # a silent skip - so the wrong one is refused by name.
+        # Both unit types are configurable, with DISJOINT parameter sets:
+        # a unit that has a reading of its own regulates (rh_start/rh_end/
+        # temp), a unit driven by another one follows (master/temp/add_time).
+        # 'A reading of its own' is an ACE 2 sensor OR a pushed external one
+        # (ACE_SET_HUMIDITY) - so an ACE Pro can be its own master once it
+        # has a source. Taking a parameter the unit cannot act on would
+        # silently store a setting that never does anything - a silent skip
+        # - so the wrong one is refused by name.
         is_v2 = self._is_v2(idx)
+        has_read = is_v2 or idx in getattr(self, '_external_rh', {})
         _wrong = ([p for p in ('MASTER', 'ADD_TIME') if gcmd.get(p, None) is not None]
                   if is_v2 else
-                  [p for p in ('RH_START', 'RH_END') if gcmd.get(p, None) is not None])
+                  [p for p in ('RH_START', 'RH_END')
+                   if gcmd.get(p, None) is not None and not has_read])
         if _wrong:
-            raise self._ace_error(
-                gcmd,
-                '%s is an ACE %s setting - ACE %d is an ACE %s'
-                % (', '.join(_wrong), 'Pro' if is_v2 else '2',
-                   self._disp(idx), '2' if is_v2 else 'Pro'),
-                code=200)
+            if is_v2:
+                _why = ('%s is a follower setting - ACE %d is an ACE 2 and '
+                        'regulates on its own sensor'
+                        % (', '.join(_wrong), self._disp(idx)))
+            else:
+                _why = ('%s needs a humidity reading - ACE %d is an ACE Pro '
+                        'and has none: push ACE_SET_HUMIDITY ACE=%d RH=... '
+                        'for it first, or drive it as a follower (MASTER=)'
+                        % (', '.join(_wrong), self._disp(idx), idx))
+            raise self._ace_error(gcmd, _why, code=200)
         key = str(idx)
         if gcmd.get_int('RESET', 0):
             self._auto_dry_cfg.pop(key, None)
         else:
             cur = dict(self._auto_dry_cfg.get(key, {}))
-            # Ranges checked HERE, not via get_*(minval=): Klipper's own
-            # parameter error surfaces as a bare level-3 "System error"
-            # popup with no hint of which value was wrong, and a
-            # single bad field then aborts the whole command - which is
-            # how an ENABLE=1 was lost together with a mistyped RH_START.
-            def _num(param, lo, hi, cast=float):
-                raw = gcmd.get(param, None)
-                if raw is None:
-                    return None
-                try:
-                    val = cast(float(raw))
-                except (TypeError, ValueError):
-                    raise self._ace_error(
-                        gcmd, '%s: "%s" is not a number' % (param, raw),
-                        code=200)
-                if val < lo or val > hi:
-                    raise self._ace_error(
-                        gcmd, '%s must be between %g and %g (got %g)'
-                              % (param, lo, hi, val), code=200)
-                return val
-            v = _num('ENABLE', 0, 1, int)
+            _num = self._gcode_num
+            v = _num(gcmd, 'ENABLE', 0, 1, int)
             if v is not None:
                 cur['enabled'] = bool(v)
-            v = _num('RH_START', 5., 95.)
+            v = _num(gcmd, 'RH_START', 5., 95.)
             if v is not None:
                 cur['rh_start'] = v
-            v = _num('RH_END', 1., 94.)
+            v = _num(gcmd, 'RH_END', 1., 94.)
             if v is not None:
                 cur['rh_end'] = v
-            v = _num('TEMP', 35, self.max_dryer_temperature, int)
+            v = _num(gcmd, 'TEMP', 35, self.max_dryer_temperature, int)
             if v is not None:
                 cur['temp'] = v
             # MASTER is the follower's master ACE INDEX (-1 = none), not the
-            # old boolean. Only a connected ACE 2 can drive anything.
-            v = _num('MASTER', -1, 3, int)
+            # old boolean. Any unit with a humidity reading can drive one:
+            # an ACE 2 sensor, or a pushed external reading.
+            v = _num(gcmd, 'MASTER', -1, 3, int)
             if v is not None:
-                if v >= 0 and not self._is_v2(v):
+                if v >= 0 and not (self._is_v2(v)
+                                   or v in getattr(self, '_external_rh', {})):
                     raise self._ace_error(
-                        gcmd, 'MASTER: ACE %d is not an ACE 2 - only an ACE 2 '
-                              'reports humidity and can drive a follower'
-                              % self._disp(v), code=200)
+                        gcmd, 'MASTER: ACE %d has no humidity reading - only '
+                              'an ACE 2, or a unit you push ACE_SET_HUMIDITY '
+                              'for, can drive a follower' % self._disp(v),
+                        code=200)
                 cur['master'] = v
-            v = _num('ADD_TIME', 0, 600, int)
+            v = _num(gcmd, 'ADD_TIME', 0, 600, int)
             if v is not None:
                 cur['add_time'] = v
             self._auto_dry_cfg[key] = cur
         eff = self._auto_dry_for(idx)
-        # Hysteresis check is an ACE 2 concern - a follower has no thresholds.
-        # Without real hysteresis the unit would switch on and off around a
-        # single reading - refuse instead of silently "fixing" the numbers.
-        if is_v2 and float(eff['rh_end']) >= float(eff['rh_start']):
+        _m = int(eff.get('master', -1))
+        # A follower (a unit driven by ANOTHER one) has no thresholds of its
+        # own. Everyone else does: the hysteresis check is what stops a unit
+        # switching on and off around a single reading - refuse instead of
+        # silently "fixing" the numbers.
+        _follows = (not is_v2 and _m >= 0 and _m != idx)
+        if not _follows and float(eff['rh_end']) >= float(eff['rh_start']):
             self._auto_dry_cfg.pop(key, None)
             raise self._ace_error(
                 gcmd, 'RH_END (%.0f) must be BELOW RH_START (%.0f)'
                       % (float(eff['rh_end']), float(eff['rh_start'])),
                 code=200)
-        # A follower with no master is ENABLED BUT INERT - nothing would ever
-        # start it, and it would say "on" while doing nothing (a silent
-        # skip). Refuse the enable and keep the rest of the
-        # settings; picking a master is one click.
-        if (not is_v2 and eff.get('enabled')
-                and int(eff.get('master', -1)) < 0):
+        # A unit with nothing that can ever start it is ENABLED BUT INERT -
+        # it would say "on" while doing nothing (a silent skip). Refuse the
+        # enable and keep the rest of the settings; there are TWO ways out
+        # now: pick a master, or push an external reading for it.
+        if (not is_v2 and eff.get('enabled') and not has_read
+                and (_m < 0 or _m == idx)):
             cur = dict(self._auto_dry_cfg.get(key, {}))
             cur['enabled'] = False
             self._auto_dry_cfg[key] = cur
             raise self._ace_error(
-                gcmd, 'ACE %d has no master - pick the ACE 2 that drives it '
-                      'before switching auto-dry on (MASTER=<ace>)'
-                      % self._disp(idx), code=200)
+                gcmd, 'ACE %d has nothing to drive it: pick a master that '
+                      'has a humidity reading (MASTER=<ace>) or push an '
+                      'external reading first (ACE_SET_HUMIDITY ACE=%d RH=...)'
+                      % (self._disp(idx), idx), code=200)
         try:
             if self.save_variables:
                 self.save_variable('ace__auto_dry', self._auto_dry_cfg,
@@ -11758,21 +11822,81 @@ class MultiAce:
                      % (self._disp(idx), eff))
         # One message per role: the parameter sets are disjoint, so a single
         # line would always print half of it as noise. NOTE master is an
-        # INDEX now - `if eff['master']` would read -1 (= none) as truthy.
-        if is_v2:
+        # INDEX - `if eff['master']` would read -1 (= none) as truthy. A Pro
+        # that regulates on a pushed reading has master -1 (or itself) and
+        # gets the threshold line like an ACE 2.
+        if is_v2 or _m < 0 or _m == idx:
             self.log_always(self._t('msg.auto_dry_config',
                 ace=self._disp(idx),
                 state='ON' if eff.get('enabled') else 'OFF',
                 start=float(eff['rh_start']), end=float(eff['rh_end']),
                 temp=int(eff['temp'])))
         else:
-            _m = int(eff.get('master', -1))
             self.log_always(self._t('msg.auto_dry_config_follower',
                 ace=self._disp(idx),
                 state='ON' if eff.get('enabled') else 'OFF',
                 master=(self._disp(_m) if _m >= 0 else '-'),
                 temp=int(eff['temp']),
                 add=int(eff.get('add_time') or 0)))
+
+    cmd_ACE_SET_HUMIDITY_help = (
+        '[multiACE] Push an external humidity reading for one ACE: '
+        'ACE_SET_HUMIDITY ACE=n RH=42.5 [TEMP=24] [TTL=900]. The reading '
+        'drives auto-dry on ANY generation while fresh (an ACE Pro has no '
+        'sensor of its own); it expires after TTL seconds (default 900, '
+        'clamped to 60..7200) and a drying cycle started from it is stopped '
+        'when it does. No reader traffic; a cycle you started by hand is '
+        'never touched.')
+
+    def cmd_ACE_SET_HUMIDITY(self, gcmd):
+        """Store one pushed external reading.
+
+        Deliberately does NOT touch _info_per_ace: the 1 Hz heartbeat
+        rebuilds that dict and would wipe the value within a second. No
+        device traffic either - the feeder must be able to push while the
+        ACE is reconnecting (or absent): the value simply ages out."""
+        idx = gcmd.get_int('ACE', minval=0, maxval=3)
+        if idx >= len(self._ace_devices):
+            raise self._ace_error(gcmd, 'No ACE %d' % self._disp(idx),
+                                  code=208)
+        rh = self._gcode_num(gcmd, 'RH', 0., 100.)
+        if rh is None:
+            raise self._ace_error(
+                gcmd, 'RH is required (0..100, e.g. RH=42.5)', code=200)
+        temp = self._gcode_num(gcmd, 'TEMP', EXTERNAL_RH_TEMP_MIN,
+                               EXTERNAL_RH_TEMP_MAX)
+        ttl = EXTERNAL_RH_DEFAULT_TTL
+        clamped = None
+        raw_ttl = gcmd.get('TTL', None)
+        if raw_ttl is not None:
+            try:
+                ttl = float(raw_ttl)
+            except (TypeError, ValueError):
+                raise self._ace_error(
+                    gcmd, 'TTL: "%s" is not a number' % raw_ttl, code=200)
+            if ttl <= 0:
+                raise self._ace_error(gcmd, 'TTL must be > 0', code=200)
+            if ttl < EXTERNAL_RH_MIN_TTL:
+                ttl, clamped = EXTERNAL_RH_MIN_TTL, raw_ttl
+            elif ttl > EXTERNAL_RH_MAX_TTL:
+                ttl, clamped = EXTERNAL_RH_MAX_TTL, raw_ttl
+        self._external_rh[idx] = {
+            'rh': rh, 'temp': temp,
+            'ts': self.reactor.monotonic(), 'ttl': ttl}
+        temp_txt = (', temp %.1f C' % temp) if temp is not None else ''
+        # One line per accepted push - the value is only ever read by the
+        # control loop and get_status, so this is the log trail for "the
+        # feeder pushed X at time T" (and for expiry investigations).
+        logging.info('[multiACE] external humidity ACE %d: %.1f%%rH%s, '
+                     'TTL %.0fs%s'
+                     % (self._disp(idx), rh, temp_txt, ttl,
+                        '' if clamped is None else
+                        ' (clamped from %s)' % clamped))
+        self.log_always(self._t('msg.ace_humidity_set',
+            ace=self._disp(idx), rh=('%.1f' % rh), temp=temp_txt,
+            ttl=int(ttl),
+            ttl_note=('' if clamped is None else
+                      ' (TTL %s clamped to %ds)' % (clamped, int(ttl)))))
 
     cmd_ACE_FW_RELEASE_help = (
         '[multiACE] Release one ACE 2 serial port for a firmware flash: '
@@ -13681,12 +13805,91 @@ class MultiAce:
         p = self._protocols.get(idx)
         return bool(p is not None and getattr(p, 'NAME', '') == 'v2')
 
-    def _ace_humidity(self, idx):
+    def _ace_internal_humidity(self, idx):
+        """The unit's OWN sensor reading (ACE 2 only - a Pro has none)."""
         try:
             h = (self._info_per_ace.get(idx) or {}).get('humidity')
             return float(h) if h is not None else None
         except (TypeError, ValueError):
             return None
+
+    def _external_rh_get(self, idx, now=None):
+        """The pushed reading of one unit while it is still inside its TTL,
+        else None. This is the ONLY freshness rule - control, status and the
+        expiry stop must never disagree about fresh vs expired."""
+        st = (getattr(self, '_external_rh', None) or {}).get(idx)
+        if not st:
+            return None
+        if now is None:
+            now = self.reactor.monotonic()
+        try:
+            if (now - float(st.get('ts', 0.))) > float(st.get('ttl', 0.)):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return st
+
+    def _external_rh_age(self, idx, now=None):
+        """Age in seconds of the last pushed reading, or None if none was
+        ever pushed. An EXPIRED reading still reports its true age (status
+        wants to say how stale it is)."""
+        st = (getattr(self, '_external_rh', None) or {}).get(idx)
+        if not st:
+            return None
+        if now is None:
+            now = self.reactor.monotonic()
+        try:
+            return max(0., now - float(st.get('ts', 0.)))
+        except (TypeError, ValueError):
+            return None
+
+    def _ace_humidity(self, idx):
+        """The reading control acts on: a FRESH pushed external one wins
+        over the unit's own sensor; a stale or absent one falls back to the
+        internal value (which a Pro never has)."""
+        ext = self._external_rh_get(idx)
+        if ext is not None:
+            return float(ext['rh'])
+        return self._ace_internal_humidity(idx)
+
+    def _ace_humidity_source(self, idx, now=None):
+        """'external' / 'internal' / None - which reading _ace_humidity
+        would use right now (the source label get_status reports)."""
+        if self._external_rh_get(idx, now) is not None:
+            return 'external'
+        if self._ace_internal_humidity(idx) is not None:
+            return 'internal'
+        return None
+
+    def _external_rh_status(self, idx, now=None):
+        """get_status keys of one unit's pushed reading. Never raises:
+        get_status is polled during __init__, before the store exists."""
+        try:
+            if now is None:
+                now = self.reactor.monotonic()
+            st = (getattr(self, '_external_rh', None) or {}).get(idx)
+            fresh = self._external_rh_get(idx, now) is not None
+            age = self._external_rh_age(idx, now)
+            internal = self._ace_internal_humidity(idx)
+            return {
+                # Last pushed value (reported even when stale), its age and
+                # TTL, whether it is fresh (external = true) and whether it
+                # started a cycle that is still running.
+                'external_humidity': (float(st['rh']) if st else None),
+                'external_humidity_temp': (st.get('temp') if st else None),
+                'external_humidity_age': age,
+                'external_humidity_ttl': (float(st.get('ttl'))
+                                          if st else None),
+                'external_humidity_fresh': fresh,
+                'external_humidity_cycle': idx in getattr(
+                    self, '_external_rh_cycle', ()),
+                # Which reading the control loop would use right now, and
+                # its effective value ('humidity' stays the DEVICE sensor).
+                'humidity_source': self._ace_humidity_source(idx, now),
+                'humidity_effective': (float(st['rh']) if fresh else internal),
+            }
+        except Exception:
+            return {}
 
     def _ace_is_drying(self, idx):
         st = ((self._info_per_ace.get(idx) or {})
@@ -13705,8 +13908,12 @@ class MultiAce:
         the next reading above rh_start simply starts a fresh cycle."""
         if idx not in self._auto_dry_started:
             return
+        had_ext = idx in getattr(self, '_external_rh_cycle', ())
         self._auto_dry_started.discard(idx)
+        self._external_rh_cycle.discard(idx)
         self._auto_dry_persist()
+        if had_ext:
+            self._auto_dry_persist_ext()
         logging.info('[multiACE] auto-dry ownership released on ACE %d (%s)'
                      % (self._disp(idx), why))
 
@@ -13718,6 +13925,21 @@ class MultiAce:
                                    sorted(self._auto_dry_started), write=True)
         except Exception as e:
             logging.info('[multiACE] persist auto-dry ownership failed: %s' % e)
+
+    def _auto_dry_persist_ext(self):
+        """Cycles started from a PUSHED reading survive a restart like the
+        ownership does: the device keeps drying across a Klipper restart,
+        the reading store does NOT (monotonic ts, memory only), so without
+        this note the first tick after a restart would see a running cycle
+        with no reading and no memory of why - and let it burn the device
+        backstop. With the note, that first tick stops it."""
+        try:
+            if self.save_variables:
+                self.save_variable('ace__auto_dry_external',
+                                   sorted(self._external_rh_cycle), write=True)
+        except Exception as e:
+            logging.info('[multiACE] persist external-rh ownership failed: %s'
+                         % e)
 
     def _auto_dry_persist_follow(self):
         """The add-time deadlines must survive a restart like the ownership
@@ -13804,11 +14026,14 @@ class MultiAce:
         if self._dry_exhaust_supported(idx):
             self._set_dry_exhaust(idx, False, why)
 
-    def _auto_dry_start(self, idx, temp, why):
+    def _auto_dry_start(self, idx, temp, why, external=False):
         # AUTO_DRY_MAX_MINUTES, not a computed runtime: the humidity check
         # ends the cycle, this is only the backstop for the case where we
         # stop asking (Klipper restart, unplugged unit) - the device must not
         # keep heating forever on its own.
+        # `external` marks a cycle started because of a PUSHED reading:
+        # _auto_dry_tick stops it when that reading expires. Followers are
+        # never external - they read nothing, they follow.
         def _cb(self, response):
             # Signature is callback(self, response) - self is the ACE
             # instance, not the callback object.
@@ -13839,6 +14064,14 @@ class MultiAce:
             else:
                 self._auto_dry_ramp.pop(idx, None)
             self._auto_dry_started.add(idx)
+            if external:
+                self._external_rh_cycle.add(idx)
+                self._auto_dry_persist_ext()
+            elif idx in self._external_rh_cycle:
+                # Re-started from the internal reading: the cycle no longer
+                # depends on the pushed one.
+                self._external_rh_cycle.discard(idx)
+                self._auto_dry_persist_ext()
             self._auto_dry_persist()
             # klippy.log too: log_always only reaches the response pipe, so
             # a fired start/stop left NO trace and a later log could not say
@@ -13861,6 +14094,10 @@ class MultiAce:
             self._close_dry_exhaust(idx, why)
             self._auto_dry_ramp.pop(idx, None)
             self._auto_dry_started.discard(idx)
+            if idx in getattr(self, '_external_rh_cycle', ()):
+                # The cycle is over - nothing left to expire.
+                self._external_rh_cycle.discard(idx)
+                self._auto_dry_persist_ext()
             self._auto_dry_persist()
             # Any stop retires a pending add-time deadline (manual stop of
             # a follower mid-window included) - a stale persisted deadline
@@ -13876,23 +14113,48 @@ class MultiAce:
                          % (idx, e))
 
     def _auto_dry_followers(self, master_idx):
-        """The ACE Pros that follow THIS master: connected, auto-dry on, and
-        pointing at master_idx. A Pro has no humidity reading of its own, so
-        following is the only thing it can do - but which ACE 2 it follows is
-        now its own setting rather than one unit claiming every Pro, so two
-        ACE 2s can drive different Pros."""
+        """The units that follow THIS master: connected, auto-dry on, and
+        pointing at master_idx. A follower reads nothing itself - following
+        is the only thing it can do - but which unit it follows is its own
+        setting rather than one unit claiming every Pro, so two units can
+        drive different followers. `i != master_idx`: a unit may name ITSELF
+        as master (the external-humidity convention our feeder uses), and a
+        self-mastered unit must not be its own follower - the start loop
+        would send the cycle twice."""
         return [i for i in range(len(self._ace_devices))
-                if self._connected_per_ace.get(i, False)
+                if i != master_idx
+                and self._connected_per_ace.get(i, False)
                 and not self._is_v2(i)
                 and self._auto_dry_for(i).get('enabled')
                 and int(self._auto_dry_for(i).get('master', -1)) == master_idx]
+
+    def _auto_dry_followers_done(self, master_idx):
+        """OUR master's cycle ended: hand the followers their own add-time.
+
+        Called from every path that stops a master we own - the normal
+        below-rh_end stop AND the external-reading expiry stop - because a
+        follower must not see a difference: it is sealed worse, cannot
+        measure itself, and keeps going for its own add_time. Without this
+        the expiry path would leave a follower to the orphan sweep, which
+        stops it at once (and says 'master done before restart', which it is
+        not)."""
+        for f in self._auto_dry_followers(master_idx):
+            if f not in self._auto_dry_started:
+                continue
+            extra = float(
+                self._auto_dry_for(f).get('add_time') or 0) * 60.
+            if extra <= 0:
+                self._auto_dry_stop(f, 'master done')
+            else:
+                self._auto_dry_follow_until[f] = time.time() + extra
+                self._auto_dry_persist_follow()
 
     def _auto_dry_ramp_tick(self, eventtime):
         """Advance the soft start of every unit we run.
 
         Deliberately its own loop over _auto_dry_started rather than a step
-        inside the humidity loop: that loop skips non-V2 units early (they
-        have no reading of their own), so a follower would have been left
+        inside the humidity loop: that loop may skip a unit (a follower, or
+        a Pro with no reading yet), so a follower would have been left
         sitting at the soft start temperature for the whole cycle.
         """
         def _cb(self, response):
@@ -13932,6 +14194,38 @@ class MultiAce:
         be the worst kind of helpfulness."""
         try:
             self._auto_dry_ramp_tick(eventtime)
+            # EXPIRY FIRST, and outside every config/role gate: a cycle WE
+            # started from a PUSHED reading must not outlive it, even if
+            # auto-dry was switched off in between, and for a unit that has
+            # no internal sensor this is the ONLY stop path there is. This
+            # is the promise the feature rests on - a feeder that dies (or a
+            # sensor that falls off the wall) stops the heater instead of
+            # turning a stale value into hours of unrequested drying.
+            for idx in list(getattr(self, '_external_rh_cycle', ())):
+                if self._external_rh_get(idx, now=eventtime) is not None:
+                    continue
+                if idx not in self._auto_dry_started:
+                    # Ownership went away on another path - drop the note.
+                    self._external_rh_cycle.discard(idx)
+                    self._auto_dry_persist_ext()
+                    continue
+                if not self._connected_per_ace.get(idx, False):
+                    continue    # comms recovery owns it; retried when back
+                age = self._external_rh_age(idx, now=eventtime)
+                if age is None:
+                    why = ('external humidity reading gone (none since '
+                           'restart)')
+                else:
+                    st = ((getattr(self, '_external_rh', None) or {})
+                          .get(idx) or {})
+                    why = ('external humidity reading expired (age %.0fs, '
+                           'TTL %.0fs)'
+                           % (age, float(st.get('ttl') or 0.)))
+                self._auto_dry_stop(idx, why)
+                # A master stopped by expiry hands its followers their own
+                # add-time exactly like a below-rh_end stop does - the
+                # reason must not change a follower's behaviour.
+                self._auto_dry_followers_done(idx)
             printing = self._is_actively_printing()
             # range(len(_ace_devices)), NOT _ace_canonical: that one holds
             # device PATHS, not indices - iterating it fed path strings into
@@ -13940,10 +14234,16 @@ class MultiAce:
             for idx in range(len(self._ace_devices)):
                 if not self._connected_per_ace.get(idx, False):
                     continue
-                if not self._is_v2(idx):
-                    continue        # no reading of its own - follower only
                 cfg = self._auto_dry_for(idx)
                 if not cfg.get('enabled'):
+                    continue
+                _m = int(cfg.get('master', -1))
+                if not self._is_v2(idx) and _m >= 0 and _m != idx:
+                    continue        # a follower waits for its master
+                ext = self._external_rh_get(idx, now=eventtime)
+                if not self._is_v2(idx) and ext is None:
+                    # A Pro has no sensor of its own; without a pushed
+                    # reading there is nothing to regulate on.
                     continue
                 rh = self._ace_humidity(idx)
                 if rh is None:
@@ -13956,9 +14256,12 @@ class MultiAce:
                 seen = (drying, ours)
                 if self._auto_dry_seen.get(idx) != seen:
                     self._auto_dry_seen[idx] = seen
-                    logging.info('[multiACE] auto-dry ACE %d: %.0f%%rH '
+                    logging.info('[multiACE] auto-dry ACE %d: %.0f%%rH (%s) '
                                  'device_drying=%s ours=%s (start>=%s stop<=%s)'
-                                 % (self._disp(idx), rh, drying, ours,
+                                 % (self._disp(idx), rh,
+                                    'external' if ext is not None
+                                    else 'internal',
+                                    drying, ours,
                                     cfg['rh_start'], cfg['rh_end']))
                 # OUR OWN bookkeeping decides, not the device status. The
                 # reported dryer state falls back to 'stop' whenever the
@@ -13970,7 +14273,11 @@ class MultiAce:
                 if not ours and not drying and rh >= float(cfg['rh_start']):
                     if printing and not self.auto_dry_while_printing:
                         continue
-                    self._auto_dry_start(idx, cfg['temp'], '%.0f%%rH' % rh)
+                    self._auto_dry_start(
+                        idx, cfg['temp'],
+                        '%.0f%%rH external' % rh if ext is not None
+                        else '%.0f%%rH' % rh,
+                        external=ext is not None)
                     # Each follower runs at ITS OWN temperature - the value
                     # is on its own card, so it has to be the one that acts.
                     for f in self._auto_dry_followers(idx):
@@ -13986,17 +14293,7 @@ class MultiAce:
                     # sealed worse and cannot tell when they are done. The
                     # deadline is wall-clock + persisted (see __init__), so
                     # a restart inside the window cannot strand them.
-                    for f in self._auto_dry_followers(idx):
-                        if f not in self._auto_dry_started:
-                            continue
-                        extra = float(
-                            self._auto_dry_for(f).get('add_time') or 0) * 60.
-                        if extra <= 0:
-                            self._auto_dry_stop(f, 'master done')
-                        else:
-                            self._auto_dry_follow_until[f] = (
-                                time.time() + extra)
-                            self._auto_dry_persist_follow()
+                    self._auto_dry_followers_done(idx)
             # Followers whose extra time is up (wall clock - survives
             # restarts; a deadline restored as already-past fires here on
             # the first tick).
@@ -14019,7 +14316,17 @@ class MultiAce:
                 if not self._connected_per_ace.get(f, False):
                     continue
                 _m = int(self._auto_dry_for(f).get('master', -1))
-                if _m < 0 or _m not in self._auto_dry_started:
+                if _m < 0 or _m == f:
+                    # Not a follower of another unit: self-regulating.
+                    # Ours only while its reading lives - the expiry loop
+                    # above already handled a cycle that was STARTED from
+                    # one; this covers a role change mid-cycle.
+                    if self._external_rh_get(f, now=eventtime) is not None:
+                        continue
+                    self._auto_dry_stop(
+                        f, 'orphaned - no humidity reading after restart')
+                    continue
+                if _m not in self._auto_dry_started:
                     self._auto_dry_stop(
                         f, 'orphaned - master done before restart')
         except Exception as e:
@@ -20772,6 +21079,9 @@ class MultiAce:
                                        else '')),
                 })
             protocol = self._protocols.get(i)
+            # Pushed external reading (ACE_SET_HUMIDITY): last value, age,
+            # freshness, source, and whether it drives a running cycle.
+            _ext = self._external_rh_status(i)
             aces.append({
                 'idx':          i,
                 'connected':    self._connected_per_ace.get(i, False),
@@ -20787,6 +21097,11 @@ class MultiAce:
                 'temp':         info.get('temp', 0),
 
                 'humidity':     info.get('humidity'),
+                # `humidity` above stays the DEVICE's own sensor value (every
+                # existing consumer keeps working); the block below says
+                # which reading control actually uses right now, how old a
+                # pushed one is and where it came from.
+                **_ext,
                 # Effective settings (defaults + this unit's override) plus
                 # whether WE are running it, so the UI can tell an automatic
                 # cycle from one the user started. str keys throughout - the
@@ -20809,12 +21124,15 @@ class MultiAce:
                 'slots':        slots_out,
             })
         ace_heads_now = [h for h in range(4) if self.head_uses_ace(h)]
-        # Candidates a follower can point at: only a connected ACE 2 has a
-        # humidity reading to drive anything. The UI fills its master
-        # dropdown from this instead of re-deriving the rule.
+        # Candidates a follower can point at: only a connected unit with a
+        # humidity reading can drive anything - an ACE 2's own sensor, or a
+        # pushed external reading (ACE_SET_HUMIDITY) for any generation.
+        # The UI fills its master dropdown from this instead of re-deriving
+        # the rule.
         auto_dry_masters = [i for i in range(len(self._ace_devices))
                             if self._connected_per_ace.get(i, False)
-                            and self._is_v2(i)]
+                            and (self._is_v2(i)
+                                 or i in getattr(self, '_external_rh', {}))]
         return {
             'api_version': ACE_API_VERSION,
             'auto_dry_masters': auto_dry_masters,

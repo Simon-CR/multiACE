@@ -579,6 +579,17 @@ def _parse_state(status: dict) -> dict:
             "temp":         a.get("temp"),
 
             "humidity":     a.get("humidity"),
+            # Pushed external humidity (Klipper ACE_SET_HUMIDITY): last
+            # value, age, freshness, source and whether it drives a running
+            # cycle. 'humidity' above stays the DEVICE's own sensor value;
+            # 'humidity_effective' is what control actually uses. Additive -
+            # an older Klipper just yields None/False here.
+            "external_humidity": a.get("external_humidity"),
+            "external_humidity_age": a.get("external_humidity_age"),
+            "external_humidity_fresh": bool(a.get("external_humidity_fresh")),
+            "external_humidity_cycle": bool(a.get("external_humidity_cycle")),
+            "humidity_source": a.get("humidity_source"),
+            "humidity_effective": a.get("humidity_effective"),
             "auto_dry":     a.get("auto_dry"),
             "auto_dry_running": bool(a.get("auto_dry_running")),
             "dryer":        a.get("dryer_status") or {},
