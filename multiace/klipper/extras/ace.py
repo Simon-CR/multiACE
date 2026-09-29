@@ -1217,6 +1217,7 @@ class MultiAce:
         self._thread_stop_flags = {}
         self._cb_locks = {}
         self._seq_lock = threading.Lock()
+        self._last_rx_ts = {}
         self._gate_status_per_ace = {}
 
         self._v2_filament_info_per_ace = {}
@@ -5389,6 +5390,7 @@ class MultiAce:
             self._serials[idx] = ser
             self._connected_per_ace[idx] = True
             self._serial_failed_per_ace[idx] = False
+            self._last_rx_ts[idx] = time.monotonic()
             self._request_ids[idx] = 0
             self._callback_maps[idx] = {}
             self._read_buffers[idx] = bytearray()
@@ -5546,6 +5548,7 @@ class MultiAce:
         self._v2_filament_info_pending.pop(idx, None)
         self._v2_filament_info_empty.pop(idx, None)
         self._connected_per_ace[idx] = False
+        self._last_rx_ts.pop(idx, None)
         ht = self._heartbeat_timers.pop(idx, None)
         if ht is not None:
             try:
@@ -5707,6 +5710,7 @@ class MultiAce:
                         idx, e))
                     continue
                 for ret in frames:
+                    self._last_rx_ts[idx] = time.monotonic()
                     msg_id = ret.get('id')
                     cb = None
                     lock = self._cb_locks.get(idx)
@@ -5734,6 +5738,7 @@ class MultiAce:
         if protocol is None:
             return
         for ret in protocol.decode_frames(buf):
+            self._last_rx_ts[idx] = time.monotonic()
             msg_id = ret.get('id')
             cb_map = self._callback_maps.get(idx, {})
             if msg_id in cb_map:
@@ -7822,6 +7827,31 @@ class MultiAce:
             ser = self._serials.get(idx)
             if ser is None or not ser.is_open:
                 return eventtime + 1.0
+
+            last_rx = self._last_rx_ts.get(idx)
+            if last_rx is not None:
+                silence = time.monotonic() - last_rx
+                if silence >= 8.0:
+                    logging.warning(
+                        '[multiACE] ACE %d transport silence >= 8.0s (mute detected), '
+                        'triggering reconnect recovery' % idx)
+                    if not self._serial_failed_per_ace.get(idx, False):
+                        self._serial_failed_per_ace[idx] = True
+                        try:
+                            self.reactor.register_async_callback(
+                                lambda et, i=idx: self._reconnect_or_pause(
+                                    i, 'transport silence >= 8.0s'))
+                        except Exception as re:
+                            logging.info(
+                                '[multiACE] Watchdog reconnect schedule failed '
+                                'ACE %d: %s' % (idx, str(re)))
+                            self._handle_per_ace_failure(idx, 'transport silence >= 8.0s')
+                    return eventtime + 1.0
+                elif silence >= 5.0:
+                    logging.info(
+                        '[multiACE] ACE %d transport silence >= 5.0s, '
+                        'issuing status probe' % idx)
+
             is_active = (idx == self._active_device_index)
 
             def callback(self, response):
