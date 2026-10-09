@@ -13,6 +13,7 @@ from serial import SerialException
 
 from .ace_protocol_v1 import AceProtocolV1
 from .ace_protocol_v2 import AceProtocolV2
+from .multiace_hal import HardwareAbstractionLayer
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
@@ -723,6 +724,8 @@ class MultiAce:
                 "line in ace.cfg (see the installation guide).")
 
         self.serial_id = config.get('serial', '')
+        self.profile = config.get('profile', 'anycubic')
+        self.hal = HardwareAbstractionLayer(self.printer, config)
         self._protocols = {}
         self._ace_path_protocol = {}
         self._ace_models = {}
@@ -20089,6 +20092,9 @@ class MultiAce:
         speed = gcmd.get_int('SPEED', 100)
         length = gcmd.get_int('LENGTH', 200)
         mode = gcmd.get_int('MODE', 0)
+        if self.profile in ['ace2k', 'snapmaker_u1', 'voron']:
+            self.hal.feed_guarded(slot, length, speed, 0)
+            return
         self._v2_dispatch_and_wait(gcmd, idx, 'feed_or_rollback_raw', {
             'index': slot, 'speed': speed, 'length': length, 'mode': mode,
         })
@@ -20099,6 +20105,9 @@ class MultiAce:
         slot = gcmd.get_int('SLOT', 0)
         speed = gcmd.get_int('SPEED', 50)
         length = gcmd.get_int('LENGTH', 100)
+        if self.profile in ['ace2k', 'snapmaker_u1', 'voron']:
+            self.hal.rollback_guarded(slot, length, speed, 0)
+            return
         self._v2_dispatch_and_wait(gcmd, idx, 'feed_or_rollback_raw', {
             'index': slot, 'speed': speed, 'length': length, 'mode': 1,
         })
